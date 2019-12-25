@@ -16,9 +16,8 @@ import click
 import zmq
 
 
-def recv(socket: zmq.Socket, timeout: int = 0) -> Tuple[str, Any]:
-    socket.poll(flags=zmq.POLLIN, timeout=timeout)
-    data = socket.recv_json(flags=zmq.NOBLOCK)
+def recv(socket: zmq.Socket, timeout: int = 0, flags: int = 0) -> Tuple[str, Any]:
+    data = socket.recv_json()
     return data["command"], data["args"]
 
 
@@ -37,6 +36,7 @@ def send(socket: zmq.Socket, command: str, args: Any, timeout: int = 0):
     required=True,
 )
 @click.option(
+    "-s",
     "--stream-port",
     type=int,
     envvar="TOX_SERVER_STREAM_PORT",
@@ -257,11 +257,10 @@ def quit(ctx: click.Context, timeout: int) -> None:
     with client(cfg["host"], cfg["port"]) as socket:
         send(socket, "QUIT", None, timeout=0)
         if socket.poll(timeout=timeout):
-            response, info = recv(socket)
+            response, info = recv(socket, timeout=0)
         else:
             click.echo("Socket timeout")
             raise click.Abort
-        response, info = recv(socket)
 
     click.echo(info)
 

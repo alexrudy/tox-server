@@ -6,3 +6,27 @@ via [ZeroMQ](https://zeromq.org). It isn't super useful on its own (as it doesn'
 helpful if your tests have to be run inside another environment with some setup cost, such as a docker container.
 
 To illustrate this, a minimal docker file is included.
+
+## Installation
+
+You can use `pip` to install `tox-server`:
+
+```
+$ pip install git+https://github.com/alexrudy/tox-server.git@master
+```
+
+(It will be published on pypi soon)
+
+## Run the server
+
+On the remote host:
+
+```
+$ tox-server serve
+```
+
+The server binds to `127.0.0.1` (i.e. it will only accept connections from localhost) because it is
+not secured. If you are running it on an isolated network (like via docker), you can bind it to another host
+with `tox-server server -b 0.0.0.0`.
+
+## Run

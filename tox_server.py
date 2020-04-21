@@ -124,6 +124,23 @@ def run_tox_command(
 
     return subprocess.CompletedProcess(args, returncode=proc.returncode)
 
+def unparse_arguments(args: Tuple[str, ...]) -> Tuple[str, ...]:
+    """
+    Un-does some parsing that click does to long argument sets.
+
+    Click will swallow an empty option ('--'), but we'd like to pass that empty
+    option on to tox on the remote server. This function re-adds the empty option
+    if it was present on the command line.
+    """
+    try:
+        idx = sys.argv.index("--") - (len(sys.argv) - len(args) - 1)
+    except ValueError:
+        pass
+    else:
+        ta = list(args)
+        ta.insert(idx, "--")
+        args = tuple(ta)
+    return args
 
 @main.command()
 @click.option(
@@ -189,6 +206,7 @@ def run(ctx: click.Context, tox_args: Tuple[bytes]) -> None:
 
     All arguments are forwarded to `tox` on the host machine.
     """
+    tox_args = unparse_arguments(tox_args)
     timeout = 10
     cfg = ctx.find_object(dict)
 

@@ -29,4 +29,12 @@ The server binds to `127.0.0.1` (i.e. it will only accept connections from local
 not secured. If you are running it on an isolated network (like via docker), you can bind it to another host
 with `tox-server server -b 0.0.0.0`.
 
-## Run
+## Run a tox command remotely
+
+On your local host, you can run a tox command:
+
+```
+$ tox-server run -e py37
+```
+
+This will run `tox -e py37` on the remote host.

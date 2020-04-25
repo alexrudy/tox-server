@@ -1,11 +1,12 @@
 import tox_server as ts
+import dataclasses as dc
 import pytest
 import mock
 import zmq
 import zmq.asyncio
 import asyncio
 from typing import Dict
-from typing import Optional, Any
+from typing import Optional, Any, Tuple
 
 
 @pytest.mark.parametrize("stream", [b"STDOUT", b"STDERR"])
@@ -66,7 +67,7 @@ def zctx():
 async def test_send_output(
     tee: bool, mock_stream: asyncio.StreamReader, mock_publisher: zmq.asyncio.Socket
 ) -> None:
-    task = asyncio.create_task(
+    task = asyncio.ensure_future(
         ts.publish_output(
             mock_stream, mock_publisher, channel=b"test-channel-STDOUT", tee=tee
         )
@@ -84,6 +85,35 @@ async def test_send_output(
     mock_publisher.send_multipart.assert_called()
 
 
+@dc.dataclass
+class URI:
+    connect: str
+    bind: str
+
+
+@pytest.fixture(params=["inproc", "tcp"])
+def protocol(request):
+    return request.param
+
+
+@pytest.fixture
+def control_uri(protocol):
+    if protocol == "inproc":
+        return URI("inproc://control", "inproc://control")
+    elif protocol == "tcp":
+        return URI("tcp://localhost:7890", "tcp://127.0.0.1:7890")
+    raise ValueError(protocol)
+
+
+@pytest.fixture
+def output_uri(protocol):
+    if protocol == "inproc":
+        return URI("inproc://output", "inproc://output")
+    elif protocol == "tcp":
+        return URI("tcp://localhost:7891", "tcp://127.0.0.1:7891")
+    raise ValueError(protocol)
+
+
 async def send_command(
     control_uri: str, command: str, args: Any, zctx: zmq.asyncio.Context
 ) -> Dict[str, Any]:
@@ -97,20 +127,26 @@ async def send_command(
     return result
 
 
-async def check_command(command, args, zctx: zmq.asyncio.Context):
-    server = ts.Server("inproc://control", "inproc://stream", zctx=zctx)
-    server_task = asyncio.create_task(server.run_forever())
+async def check_command(
+    command, args, control_uri: URI, output_uri: URI, zctx: zmq.asyncio.Context
+) -> Tuple[ts.Message, bool]:
+    server = ts.Server(control_uri.bind, output_uri.bind, zctx=zctx)
+    server_task = asyncio.ensure_future(server.run_forever())
 
-    commander = asyncio.create_task(
-        send_command("inproc://control", command, args, zctx=zctx)
+    message = ts.Message(command=ts.Command[command], args=args)
+
+    commander = asyncio.ensure_future(
+        ts.single_command(control_uri.connect, message, zctx=zctx, timeout=1)
     )
 
     (done, pending) = await asyncio.wait(
-        (server_task, commander), timeout=0.1, return_when=asyncio.ALL_COMPLETED
+        (server_task, commander), timeout=0.2, return_when=asyncio.ALL_COMPLETED
     )
-    server_task.cancel()
 
+    server_task.cancel()
+    await asyncio.wait_for(server_task, timeout=1.0)
     assert commander in done
+
     rv = commander.result()
 
     return rv, (server_task in done)
@@ -135,7 +171,6 @@ IGNORE = object()
     [
         ("QUIT", None, "QUIT", "DONE"),
         ("PING", None, "PONG", IGNORE),
-        ("BAZ", None, "ERR", {"message": "Unknown command: BAZ"}),
         (
             "RUN",
             {"tox": ["foo"], "channel": "bar"},
@@ -143,13 +178,20 @@ IGNORE = object()
             {"returncode": 0, "args": ["foo"]},
         ),
     ],
-    ids=["QUIT", "PING", "ERR", "RUN"],
+    ids=["QUIT", "PING", "RUN"],
 )
 async def test_serve(
-    command, args, rcommand, rargs, create_subprocess_monkey, zctx
+    command,
+    args,
+    rcommand,
+    rargs,
+    create_subprocess_monkey,
+    control_uri,
+    output_uri,
+    zctx,
 ) -> None:
-    rv, finished = await check_command(command, args, zctx)
+    rv, finished = await check_command(command, args, control_uri, output_uri, zctx)
     assert finished == (command == "QUIT")
-    assert rv["command"] == rcommand
+    assert rv.command.name == rcommand
     if rargs is not IGNORE:
-        assert rv["args"] == rargs
+        assert rv.args == rargs

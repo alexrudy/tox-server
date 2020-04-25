@@ -29,7 +29,7 @@ def recv(socket: zmq.Socket, timeout: int = 0, flags: int = 0) -> Tuple[str, Any
 
 
 def send(socket: zmq.Socket, command: str, args: Any, timeout: int = 0):
-    socket.poll(flags=zmq.POLLOUT, timeout=timeout)
+    # socket.poll(flags=zmq.POLLOUT, timeout=timeout)
     socket.send_json({"command": command, "args": args}, flags=zmq.NOBLOCK)
 
 
@@ -80,7 +80,7 @@ class Message:
                 message=f"Unknown command: {command}", identifiers=identifiers
             )
 
-        return cls(command=command, args=args)
+        return cls(command=command, args=args, identifiers=identifiers)
 
     def assemble(self) -> List[bytes]:
         message = json.dumps({"command": self.command.name, "args": self.args}).encode(
@@ -163,15 +163,16 @@ def main(
     cfg["port"] = port
     cfg["stream_port"] = stream_port
     cfg["bind_host"] = bind_host
+
+    control_uri = cfg["control_uri"] = f"tcp://{host}:{port:d}"
     logging.basicConfig(
         format=f"[{ctx.invoked_subcommand}] %(message)s", level=logging.INFO
     )
 
 
-def client(host: str, port: int) -> zmq.Socket:
+def client(uri: str) -> zmq.Socket:
     zctx = zmq.Context.instance()
     socket = zctx.socket(zmq.REQ)
-    uri = f"tcp://{host:s}:{port:d}"
     socket.connect(uri)
     socket.set(zmq.LINGER, 10)
     click.echo(f"Connected to {uri}")
@@ -213,10 +214,10 @@ async def tox_command(
     bchan = channel.encode("utf-8")
 
     output_tasks = {
-        asyncio.create_task(
+        asyncio.ensure_future(
             publish_output(proc.stdout, output, bchan + b"STDOUT", tee=tee)
         ),
-        asyncio.create_task(
+        asyncio.ensure_future(
             publish_output(proc.stderr, output, bchan + b"STDERR", tee=tee)
         ),
     }
@@ -281,63 +282,78 @@ class Server:
         zctx: Optional[zmq.asyncio.Context] = None,
     ) -> None:
         self.control_uri = control_uri
-        self.zctx = zctx or zmq.asyncio.Context.instance()
-
-        self.socket = self.zctx.socket(zmq.REP)
-        self.socket.bind(self.control_uri)
-
-        self.output = self.zctx.socket(zmq.PUB)
-        self.output.bind(output_uri)
+        self.output_uri = output_uri
+        self.zctx = zctx or zmq.asyncio.Context()
 
         self.running = False
 
     async def run_forever(self) -> None:
         self.running = True
-        while self.running:
-            await self.handle_command()
-        self.socket.close()
-        self.output.close()
+
+        self.output = self.zctx.socket(zmq.PUB)
+        self.output.bind(self.output_uri)
+
+        self.socket = self.zctx.socket(zmq.REP)
+        self.socket.bind(self.control_uri)
+
+        log.info(f"Running server at {self.control_uri}")
+        log.info(f"^C to exit")
+        try:
+            while self.running:
+                await self.handle_command()
+        except asyncio.CancelledError:
+            log.info("Server cancelled")
+        except BaseException:
+            log.exception("Server loop error")
+            raise
+        finally:
+            self.socket.close()
+            self.output.close()
+        log.debug(f"Server is done.")
+
+    async def send(self, message: Message) -> None:
+        log.debug(f".send {message!r}")
+        await self.socket.send_multipart(message.assemble())
 
     async def handle_command(self) -> None:
         data = await self.socket.recv_multipart()
+        log.debug(f"Data: {data!r}")
 
         try:
             msg = Message.parse(data)
         except ProtocolError as e:
             log.critical("Protocol error")
-            await self.socket.send_multipart(e.message.assemble())
+            await self.send(e.message)
             return
         except ProtocolFailure:
             log.critical("Protocol failure")
-            return
+            raise
 
-        log.info(f"Message: {msg!r}")
+        log.debug(f"Message: {msg!r}")
 
         try:
             await getattr(self, f"handle_{msg.command.name.lower()}")(msg)
         except Exception as e:
             log.exception("Error in handler")
             err = msg.respond(command=Command.ERR, args={"message": str(e)})
-            await self.socket.send_multipart(err.assemble())
+            await self.send(err)
 
     async def handle_run(self, msg: Message) -> None:
         result = await tox_command(msg.args["tox"], msg.args["channel"], self.output)
 
-        await self.socket.send_multipart(
+        await self.send(
             msg.respond(
                 Command.RUN, {"returncode": result.returncode, "args": result.args}
-            ).assemble()
+            )
         )
 
     async def handle_quit(self, msg: Message) -> None:
         self.running = False
 
-        await self.socket.send_multipart(msg.respond(Command.QUIT, "DONE").assemble())
+        await self.send(msg.respond(Command.QUIT, "DONE"))
 
     async def handle_ping(self, msg: Message) -> None:
-        await self.socket.send_multipart(
-            msg.respond(Command.PONG, {"time": time.time()}).assemble()
-        )
+        await self.send(msg.respond(Command.PONG, {"time": time.time()}))
 
 
 def unparse_arguments(args: Tuple[str, ...]) -> Tuple[str, ...]:
@@ -375,9 +391,13 @@ def serve(ctx: click.Context, tee: bool = True) -> None:
     control_uri = f"tcp://{cfg['bind_host']}:{cfg['port']:d}"
     output_uri = f"tcp://{cfg['bind_host']}:{cfg['stream_port']:d}"
 
-    server = Server(control_uri, output_uri)
+    try:
+        server = Server(control_uri, output_uri)
 
-    asyncio.run(server.run_forever())
+        asyncio.run(server.run_forever())
+    except BaseException:
+        log.exception("Exception")
+        raise
 
 
 @main.command(context_settings=dict(ignore_unknown_options=True))
@@ -405,11 +425,15 @@ def run(ctx: click.Context, tox_args: Tuple[str, ...]) -> None:
 
     start = time.monotonic()
 
-    with output, client(cfg["host"], cfg["port"]) as socket:
+    with output, client(cfg["control_uri"]) as socket:
         poller.register(socket, flags=zmq.POLLIN)
         poller.register(output, flags=zmq.POLLIN)
 
-        send(socket, "RUN", {"tox": tox_args, "channel": channel}, timeout=0)
+        message = Message(
+            command=Command.RUN, args={"tox": tox_args, "channel": channel}
+        )
+
+        socket.send_multipart(message.assemble())
         while True:
             events = dict(poller.poll(timeout=10))
             if output in events:
@@ -425,13 +449,15 @@ def run(ctx: click.Context, tox_args: Tuple[str, ...]) -> None:
                 click.echo("Command timed out!", err=True)
                 raise click.Abort()
 
-        reply, info = recv(socket, timeout=0)
-        if reply == "ERR":
-            click.echo(repr(info), err=True)
+        data = socket.recv_multipart()
+        message = Message.parse(data)
+
+        if message.command == Command.ERR:
+            click.echo(repr(message.args), err=True)
             raise click.Abort()
-        elif reply == "RUN":
+        elif message.command == Command.RUN:
             response: subprocess.CompletedProcess = subprocess.CompletedProcess(
-                args=info["args"], returncode=info["returncode"]
+                args=message.args["args"], returncode=message.args["returncode"]
             )
     if response.returncode == 0:
         click.echo(f"[{click.style('DONE', fg='green')}] passed")
@@ -455,15 +481,43 @@ def quit(ctx: click.Context, timeout: int) -> None:
     """
     cfg = ctx.find_object(dict)
 
-    with client(cfg["host"], cfg["port"]) as socket:
-        send(socket, "QUIT", None, timeout=0)
-        if socket.poll(timeout=timeout):
-            response, info = recv(socket, timeout=0)
-        else:
-            click.echo("Socket timeout")
-            raise click.Abort
+    message = Message(command=Command.QUIT, args=None)
+    try:
+        response = asyncio.run(
+            single_command(cfg["control_uri"], message, timeout=timeout)
+        )
+    except BaseException:
+        log.exception("Exception")
+        raise
+    click.echo(response)
 
-    click.echo(info)
+
+async def single_command(
+    uri: str,
+    message: Message,
+    timeout: Optional[int] = None,
+    zctx: Optional[zmq.asyncio.Context] = None,
+) -> Any:
+    zctx = zctx or zmq.asyncio.Context()
+
+    socket = zctx.socket(zmq.REQ)
+    socket.connect(uri)
+    log.info(f"Connection to {uri}")
+
+    log.info(f"Sending message {message!r}")
+
+    task = asyncio.ensure_future(reqrep(socket, message.assemble()))
+    await asyncio.wait_for(task, timeout=timeout)
+    data = task.result()
+
+    message = Message.parse(data)
+    return message
+
+
+async def reqrep(socket: zmq.asyncio.Socket, data: List[bytes]) -> List[bytes]:
+    await socket.send_multipart(data)
+    log.info(f"Waiting for response from {data!r}")
+    return await socket.recv_multipart()
 
 
 @main.command()
@@ -481,14 +535,42 @@ def ping(ctx: click.Context, timeout: int) -> None:
     """
     cfg = ctx.find_object(dict)
 
-    with client(cfg["host"], cfg["port"]) as socket:
-        send(socket, "PING", None)
-        if socket.poll(timeout=timeout):
-            response, now = recv(socket)
-        else:
-            click.echo("Socket timeout")
-            raise click.Abort
+    message = Message(command=Command.PING, args=None)
+    try:
+        response = asyncio.run(
+            single_command(cfg["control_uri"], message, timeout=timeout)
+        )
+    except BaseException:
+        log.exception("Exception")
+        raise
     click.echo(response)
+
+
+async def echoer(control_uri: str):
+    zctx = zmq.asyncio.Context()
+    socket = zctx.socket(zmq.REP)
+    socket.bind(control_uri)
+
+    while True:
+        message = await socket.recv_multipart()
+        log.info(f"Message: {message!r}")
+        await socket.send_multipart(message)
+
+
+@main.command()
+@click.pass_context
+def echo(ctx: click.Context) -> None:
+    """
+    Ping the server, to check if it is alive.
+    """
+    cfg = ctx.find_object(dict)
+    control_uri = f"tcp://{cfg['bind_host']}:{cfg['port']:d}"
+
+    try:
+        asyncio.run(echoer(control_uri))
+    except BaseException:
+        log.exception("Exception")
+        raise
 
 
 if __name__ == "__main__":

@@ -186,63 +186,55 @@ async def publish_output(
             localstream.flush()
 
 
-async def serve_async(
-    control_uri: str, output_uri: str, zctx: Optional[zmq.asyncio.Context] = None
-) -> None:
+class Server:
+    def __init__(
+        self,
+        control_uri: str,
+        output_uri: str,
+        zctx: Optional[zmq.asyncio.Context] = None,
+    ) -> None:
+        self.control_uri = control_uri
+        self.zctx = zctx or zmq.asyncio.Context.instance()
 
-    zctx = zctx or zmq.asyncio.Context.instance()
+        self.socket = self.zctx.socket(zmq.REP)
+        self.socket.bind(self.control_uri)
 
-    # Control socket
-    socket = zctx.socket(zmq.REP)
-    socket.bind(control_uri)
+        self.output = self.zctx.socket(zmq.PUB)
+        self.output.bind(output_uri)
 
-    # Output socket
-    output = zctx.socket(zmq.PUB)
-    output.bind(output_uri)
+        self.running = False
 
-    with socket, output:
-        log.info(f"asyncio implementation")
-        log.info(f"Serving on {control_uri}")
-        log.info(f"Output on {output_uri}")
-        log.info("^C to exit.")
-        while True:
-            data = await socket.recv_json()
-            cmd, args = data["command"], data["args"]
-            print(f"{cmd}: {args!r}")
-            if cmd == "QUIT":
-                await send_command(socket, "QUIT", "DONE")
-                break
+    async def run_forever(self) -> None:
+        self.running = True
+        while self.running:
+            await self.handle_command()
+        await send_command(self.socket, "QUIT", "DONE")
+        self.socket.close()
+        self.output.close()
 
-            elif cmd == "RUN":
-                try:
-                    task = asyncio.create_task(
-                        tox_command(args["tox"], args["channel"], output)
-                    )
-                    result = await task
-                    await send_command(
-                        socket,
-                        "RUN",
-                        {"returncode": result.returncode, "args": result.args},
-                    )
+    async def handle_command(self) -> None:
+        data = await self.socket.recv_json()
+        cmd, args = data["command"], data["args"]
+        log.info(f"Command: {cmd} | {args!r}")
 
-                except Exception as e:
-                    await socket.send_json(
-                        {
-                            "command": "ERR",
-                            "args": {"command": cmd, "message": repr(e)},
-                        }
-                    )
-            elif cmd == "PING":
-                await socket.send_json(
-                    {"command": "PONG", "args": {"time": time.time()}}
-                )
-            else:
-                await socket.send_json(
-                    {
-                        "command": "ERR",
-                        "args": {"command": cmd, "message": "Unknown command"},
-                    }
-                )
+        try:
+            await getattr(self, f"handle_{cmd.lower()}")(args)
+        except AttributeError:
+            await send_command(
+                self.socket, "ERR", {"command": cmd, "message": "Unknown command"}
+            )
+
+    async def handle_run(self, args: Any) -> None:
+        result = await tox_command(args["tox"], args["channel"], self.output)
+        await send_command(
+            self.socket, "RUN", {"returncode": result.returncode, "args": result.args},
+        )
+
+    async def handle_quit(self, args: Any) -> None:
+        self.running = False
+
+    async def handle_ping(self, args: Any) -> None:
+        await send_command(self.socket, "PONG", {"time": time.time()})
 
 
 def unparse_arguments(args: Tuple[str, ...]) -> Tuple[str, ...]:
@@ -280,7 +272,9 @@ def serve(ctx: click.Context, tee: bool = True) -> None:
     control_uri = f"tcp://{cfg['bind_host']}:{cfg['port']:d}"
     output_uri = f"tcp://{cfg['bind_host']}:{cfg['stream_port']:d}"
 
-    asyncio.run(serve_async(control_uri, output_uri))
+    server = Server(control_uri, output_uri)
+
+    asyncio.run(server.run_forever())
 
 
 @main.command(context_settings=dict(ignore_unknown_options=True))

@@ -94,24 +94,22 @@ async def send_command(
 
 async def check_command(command, args):
     zctx = zmq.asyncio.Context.instance()
-    server = asyncio.create_task(
-        ts.serve_async("inproc://control", "inproc://stream", zctx=zctx)
-    )
+    server = ts.Server("inproc://control", "inproc://stream", zctx=zctx)
+    server_task = asyncio.create_task(server.run_forever())
 
     commander = asyncio.create_task(
         send_command("inproc://control", command, args, zctx=zctx)
     )
 
     (done, pending) = await asyncio.wait(
-        (server, commander), timeout=0.1, return_when=asyncio.ALL_COMPLETED
+        (server_task, commander), timeout=0.1, return_when=asyncio.ALL_COMPLETED
     )
-    server.cancel()
+    server_task.cancel()
 
     assert commander in done
-
     rv = commander.result()
 
-    return rv, (server in done)
+    return rv, (server_task in done)
 
 
 @pytest.fixture
@@ -149,28 +147,3 @@ async def test_serve(command, args, rcommand, rargs, create_subprocess_monkey) -
     assert rv["command"] == rcommand
     if rargs is not IGNORE:
         assert rv["args"] == rargs
-
-
-@pytest.mark.asyncio
-async def test_serve_unknown() -> None:
-    zctx = zmq.asyncio.Context.instance()
-    task = asyncio.create_task(
-        ts.serve_async("inproc://control", "inproc://stream", zctx=zctx)
-    )
-
-    commander = asyncio.create_task(
-        send_command("inproc://control", "BAZ", None, zctx=zctx)
-    )
-
-    (done, pending) = await asyncio.wait(
-        (task, commander), timeout=0.1, return_when=asyncio.ALL_COMPLETED
-    )
-    assert len(pending) == 1
-    assert len(done) == 1
-
-    task.cancel()
-
-    rv = commander.result()
-    assert rv["command"] == "ERR"
-    assert rv["args"]["message"] == "Unknown command"
-    assert rv["args"]["command"] == "BAZ"

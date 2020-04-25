@@ -400,6 +400,47 @@ def serve(ctx: click.Context, tee: bool = True) -> None:
         raise
 
 
+async def show_output(socket: zmq.asyncio.Socket):
+    streams = LocalStreams()
+
+    while True:
+        chan, data = await socket.recv_multipart()
+        stream = streams[chan]
+        stream.write(data)
+        stream.flush()
+
+
+async def run_command(
+    control_uri,
+    output_uri,
+    tox_args: Tuple[str, ...],
+    channel: str,
+    zctx: Optional[zmq.asyncio.Context] = None,
+):
+    zctx = zctx or zmq.asyncio.Context.instance()
+
+    client = zctx.socket(zmq.REQ)
+    client.connect(control_uri)
+
+    output = zctx.socket(zmq.SUB)
+    output.connect(output_uri)
+    output.subscribe(channel.encode("utf-8"))
+
+    message = Message(command=Command.RUN, args={"tox": tox_args, "channel": channel})
+
+    with client, output:
+
+        await client.send_multipart(message.assemble())
+        output_task = asyncio.ensure_future(show_output(output))
+
+        data = await client.recv_multipart()
+        output_task.cancel()
+
+        message = Message.parse(data)
+
+    return message
+
+
 @main.command(context_settings=dict(ignore_unknown_options=True))
 @click.pass_context
 @click.argument("tox_args", nargs=-1, type=click.UNPROCESSED)
@@ -410,55 +451,23 @@ def run(ctx: click.Context, tox_args: Tuple[str, ...]) -> None:
     All arguments are forwarded to `tox` on the host machine.
     """
     tox_args = unparse_arguments(tox_args)
-    timeout = 10
     cfg = ctx.find_object(dict)
 
     channel = str(uuid.uuid4())
 
-    zctx = zmq.Context.instance()
-    output = zctx.socket(zmq.SUB)
-    output.connect(f"tcp://{cfg['host']}:{cfg['stream_port']:d}")
-    output.subscribe(channel.encode("utf-8"))
+    output_uri = f"tcp://{cfg['host']}:{cfg['stream_port']:d}"
 
-    poller = zmq.Poller()
-    streams = LocalStreams()
+    message = asyncio.run(
+        run_command(cfg["control_uri"], output_uri, tox_args, channel)
+    )
 
-    start = time.monotonic()
-
-    with output, client(cfg["control_uri"]) as socket:
-        poller.register(socket, flags=zmq.POLLIN)
-        poller.register(output, flags=zmq.POLLIN)
-
-        message = Message(
-            command=Command.RUN, args={"tox": tox_args, "channel": channel}
+    if message.command == Command.ERR:
+        click.echo(repr(message.args), err=True)
+        raise click.Abort()
+    elif message.command == Command.RUN:
+        response: subprocess.CompletedProcess = subprocess.CompletedProcess(
+            args=message.args["args"], returncode=message.args["returncode"]
         )
-
-        socket.send_multipart(message.assemble())
-        while True:
-            events = dict(poller.poll(timeout=10))
-            if output in events:
-                start = time.monotonic()
-                chan, data = output.recv_multipart()
-                stream = streams[chan]
-                stream.write(data)
-                stream.flush()
-            elif socket in events:
-                break
-
-            if time.monotonic() - start > timeout:
-                click.echo("Command timed out!", err=True)
-                raise click.Abort()
-
-        data = socket.recv_multipart()
-        message = Message.parse(data)
-
-        if message.command == Command.ERR:
-            click.echo(repr(message.args), err=True)
-            raise click.Abort()
-        elif message.command == Command.RUN:
-            response: subprocess.CompletedProcess = subprocess.CompletedProcess(
-                args=message.args["args"], returncode=message.args["returncode"]
-            )
     if response.returncode == 0:
         click.echo(f"[{click.style('DONE', fg='green')}] passed")
     else:

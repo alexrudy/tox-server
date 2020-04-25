@@ -164,7 +164,7 @@ def main(
     cfg["stream_port"] = stream_port
     cfg["bind_host"] = bind_host
 
-    control_uri = cfg["control_uri"] = f"tcp://{host}:{port:d}"
+    cfg["control_uri"] = f"tcp://{host}:{port:d}"
     logging.basicConfig(
         format=f"[{ctx.invoked_subcommand}] %(message)s", level=logging.INFO
     )
@@ -293,7 +293,7 @@ class Server:
         self.output = self.zctx.socket(zmq.PUB)
         self.output.bind(self.output_uri)
 
-        self.socket = self.zctx.socket(zmq.REP)
+        self.socket = self.zctx.socket(zmq.ROUTER)
         self.socket.bind(self.control_uri)
 
         log.info(f"Running server at {self.control_uri}")
@@ -419,14 +419,18 @@ async def run_command(
 ):
     zctx = zctx or zmq.asyncio.Context.instance()
 
-    client = zctx.socket(zmq.REQ)
+    client = zctx.socket(zmq.DEALER)
     client.connect(control_uri)
 
     output = zctx.socket(zmq.SUB)
     output.connect(output_uri)
     output.subscribe(channel.encode("utf-8"))
 
-    message = Message(command=Command.RUN, args={"tox": tox_args, "channel": channel})
+    message = Message(
+        command=Command.RUN,
+        args={"tox": tox_args, "channel": channel},
+        identifiers=[b""],
+    )
 
     with client, output:
 

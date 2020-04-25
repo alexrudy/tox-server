@@ -7,6 +7,9 @@ import shlex
 import sys
 import time
 import uuid
+import json
+import enum
+import dataclasses as dc
 from typing import Optional
 from typing import IO
 from typing import List
@@ -28,6 +31,44 @@ def recv(socket: zmq.Socket, timeout: int = 0, flags: int = 0) -> Tuple[str, Any
 def send(socket: zmq.Socket, command: str, args: Any, timeout: int = 0):
     socket.poll(flags=zmq.POLLOUT, timeout=timeout)
     socket.send_json({"command": command, "args": args}, flags=zmq.NOBLOCK)
+
+
+class Command(enum.Enum):
+    ERR = enum.auto()
+    QUIT = enum.auto()
+    PING = enum.auto()
+    PONG = enum.auto()
+    RUN = enum.auto()
+
+
+@dc.dataclass
+class Message:
+
+    command: Command
+    args: Any
+
+    identifiers: Optional[List[bytes]] = None
+
+    @classmethod
+    def parse(cls, message: List[bytes]) -> "Message":
+        *identifiers, mpart = message
+        mdata = json.loads(mpart)
+        command = Command[mdata["command"]]
+        args = mdata["args"]
+        if identifiers and not identifiers[-1] == b"":
+            raise ValueError(f"Invalid multipart identifiers: {identifiers}")
+        return cls(command=command, args=args)
+
+    def assemble(self) -> List[bytes]:
+        message = json.dumps({"command": self.command.name, "args": self.args}).encode(
+            "utf-8"
+        )
+        if self.identifiers:
+            return self.identifiers + [message]
+        return [message]
+
+    def respond(self, command: Command, args: Any) -> "Message":
+        return self.__class__(command=command, args=args, identifiers=self.identifiers)
 
 
 @click.group()
@@ -208,33 +249,60 @@ class Server:
         self.running = True
         while self.running:
             await self.handle_command()
-        await send_command(self.socket, "QUIT", "DONE")
         self.socket.close()
         self.output.close()
 
-    async def handle_command(self) -> None:
-        data = await self.socket.recv_json()
-        cmd, args = data["command"], data["args"]
-        log.info(f"Command: {cmd} | {args!r}")
+    async def recv(self) -> Optional[Message]:
+        data = await self.socket.recv_multipart()
 
         try:
-            await getattr(self, f"handle_{cmd.lower()}")(args)
-        except AttributeError:
-            await send_command(
-                self.socket, "ERR", {"command": cmd, "message": "Unknown command"}
+            msg = Message.parse(data)
+        except KeyError:
+            err = Message(
+                command=Command.ERR,
+                args={
+                    "message": "Unknown command",
+                    "command": json.loads(data[-1])["command"],
+                },
+                identifiers=data[:-1],
             )
+            await self.socket.send_multipart(err.assemble())
+            return None
+        else:
+            return msg
 
-    async def handle_run(self, args: Any) -> None:
-        result = await tox_command(args["tox"], args["channel"], self.output)
-        await send_command(
-            self.socket, "RUN", {"returncode": result.returncode, "args": result.args},
+    async def handle_command(self) -> None:
+        msg = await self.recv()
+        if not msg:
+            return
+
+        log.info(f"Message: {msg!r}")
+
+        try:
+            await getattr(self, f"handle_{msg.command.name.lower()}")(msg)
+        except Exception as e:
+            log.exception("Error in handler")
+            err = msg.respond(command=Command.ERR, args={"message": str(e)})
+            await self.socket.send_multipart(err.assemble())
+
+    async def handle_run(self, msg: Message) -> None:
+        result = await tox_command(msg.args["tox"], msg.args["channel"], self.output)
+
+        await self.socket.send_multipart(
+            msg.respond(
+                Command.RUN, {"returncode": result.returncode, "args": result.args}
+            ).assemble()
         )
 
-    async def handle_quit(self, args: Any) -> None:
+    async def handle_quit(self, msg: Message) -> None:
         self.running = False
 
-    async def handle_ping(self, args: Any) -> None:
-        await send_command(self.socket, "PONG", {"time": time.time()})
+        await self.socket.send_multipart(msg.respond(Command.QUIT, "DONE").assemble())
+
+    async def handle_ping(self, msg: Message) -> None:
+        await self.socket.send_multipart(
+            msg.respond(Command.PONG, {"time": time.time()}).assemble()
+        )
 
 
 def unparse_arguments(args: Tuple[str, ...]) -> Tuple[str, ...]:

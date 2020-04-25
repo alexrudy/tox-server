@@ -53,6 +53,14 @@ def mock_stream() -> asyncio.StreamReader:
     return stream
 
 
+@pytest.fixture()
+def zctx():
+
+    context = zmq.asyncio.Context()
+    yield context
+    context.term()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("tee", [True, False])
 async def test_send_output(
@@ -77,10 +85,7 @@ async def test_send_output(
 
 
 async def send_command(
-    control_uri: str,
-    command: str,
-    args: Any,
-    zctx: Optional[zmq.asyncio.Context] = None,
+    control_uri: str, command: str, args: Any, zctx: zmq.asyncio.Context
 ) -> Dict[str, Any]:
     zctx = zctx or zmq.asyncio.Context.instance()
     zsocket = zctx.socket(zmq.REQ)
@@ -92,8 +97,7 @@ async def send_command(
     return result
 
 
-async def check_command(command, args):
-    zctx = zmq.asyncio.Context.instance()
+async def check_command(command, args, zctx: zmq.asyncio.Context):
     server = ts.Server("inproc://control", "inproc://stream", zctx=zctx)
     server_task = asyncio.create_task(server.run_forever())
 
@@ -141,8 +145,10 @@ IGNORE = object()
     ],
     ids=["QUIT", "PING", "ERR", "RUN"],
 )
-async def test_serve(command, args, rcommand, rargs, create_subprocess_monkey) -> None:
-    rv, finished = await check_command(command, args)
+async def test_serve(
+    command, args, rcommand, rargs, create_subprocess_monkey, zctx
+) -> None:
+    rv, finished = await check_command(command, args, zctx)
     assert finished == (command == "QUIT")
     assert rv["command"] == rcommand
     if rargs is not IGNORE:

@@ -135,7 +135,7 @@ IGNORE = object()
     [
         ("QUIT", None, "QUIT", "DONE"),
         ("PING", None, "PONG", IGNORE),
-        ("BAZ", None, "ERR", {"message": "Unknown command", "command": "BAZ"}),
+        ("BAZ", None, "ERR", {"message": "Unknown command: BAZ"}),
         (
             "RUN",
             {"tox": ["foo"], "channel": "bar"},

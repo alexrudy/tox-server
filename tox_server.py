@@ -51,12 +51,35 @@ class Message:
 
     @classmethod
     def parse(cls, message: List[bytes]) -> "Message":
+        if not message:
+            raise ProtocolFailure("No message parts recieved")
+
         *identifiers, mpart = message
-        mdata = json.loads(mpart)
-        command = Command[mdata["command"]]
-        args = mdata["args"]
+
         if identifiers and not identifiers[-1] == b"":
-            raise ValueError(f"Invalid multipart identifiers: {identifiers}")
+            raise ProtocolFailure(f"Invalid multipart identifiers: {identifiers!r}")
+
+        try:
+            mdata = json.loads(mpart)
+        except (TypeError, ValueError) as e:
+            raise ProtocolError.from_message(
+                message=f"JSON decode error: {e}", identifiers=identifiers
+            )
+
+        try:
+            command, args = mdata["command"], mdata["args"]
+        except KeyError as e:
+            raise ProtocolError.from_message(
+                message=f"JSON missing key: {e}", identifiers=identifiers
+            )
+
+        try:
+            command = Command[command]
+        except KeyError:
+            raise ProtocolError.from_message(
+                message=f"Unknown command: {command}", identifiers=identifiers
+            )
+
         return cls(command=command, args=args)
 
     def assemble(self) -> List[bytes]:
@@ -69,6 +92,29 @@ class Message:
 
     def respond(self, command: Command, args: Any) -> "Message":
         return self.__class__(command=command, args=args, identifiers=self.identifiers)
+
+
+@dc.dataclass
+class ProtocolError(Exception):
+    message: Message
+
+    def __str__(self) -> str:
+        return self.message.args["message"]
+
+    @classmethod
+    def from_message(
+        cls, message: str, identifiers: Optional[List[bytes]] = None
+    ) -> "ProtocolError":
+        return cls(
+            message=Message(Command.ERR, {"message": message}, identifiers=identifiers)
+        )
+
+
+@dc.dataclass
+class ProtocolFailure(Exception):
+    """A protocol error we can't recover from, the message was so malformed, no response is possible"""
+
+    message: str
 
 
 @click.group()
@@ -252,28 +298,17 @@ class Server:
         self.socket.close()
         self.output.close()
 
-    async def recv(self) -> Optional[Message]:
+    async def handle_command(self) -> None:
         data = await self.socket.recv_multipart()
 
         try:
             msg = Message.parse(data)
-        except KeyError:
-            err = Message(
-                command=Command.ERR,
-                args={
-                    "message": "Unknown command",
-                    "command": json.loads(data[-1])["command"],
-                },
-                identifiers=data[:-1],
-            )
-            await self.socket.send_multipart(err.assemble())
-            return None
-        else:
-            return msg
-
-    async def handle_command(self) -> None:
-        msg = await self.recv()
-        if not msg:
+        except ProtocolError as e:
+            log.critical("Protocol error")
+            await self.socket.send_multipart(e.message.assemble())
+            return
+        except ProtocolFailure:
+            log.critical("Protocol failure")
             return
 
         log.info(f"Message: {msg!r}")

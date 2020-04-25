@@ -34,5 +34,5 @@ setup(
     packages=find_packages(),
     python_requires=">=3.6, <4",
     entry_points={"console_scripts": ["tox-server = tox_server:main"]},
-    install_requires=["click", "pyzmq", "tox"],
+    install_requires=["click", "pyzmq", "tox", 'dataclasses;python_version<"3.7"'],
 )

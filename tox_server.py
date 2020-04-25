@@ -1,12 +1,13 @@
 #!/usr/bin/env python3
+import asyncio
 import os
-import selectors
 import subprocess
+import logging
+import shlex
 import sys
 import time
 import uuid
-from typing import cast
-from typing import Dict
+from typing import Optional
 from typing import IO
 from typing import List
 from typing import Tuple
@@ -14,6 +15,9 @@ from typing import Any
 
 import click
 import zmq
+import zmq.asyncio
+
+log = logging.getLogger(__name__)
 
 
 def recv(socket: zmq.Socket, timeout: int = 0, flags: int = 0) -> Tuple[str, Any]:
@@ -72,57 +76,174 @@ def main(
     cfg["port"] = port
     cfg["stream_port"] = stream_port
     cfg["bind_host"] = bind_host
+    logging.basicConfig(
+        format=f"[{ctx.invoked_subcommand}] %(message)s", level=logging.INFO
+    )
 
 
 def client(host: str, port: int) -> zmq.Socket:
     zctx = zmq.Context.instance()
     socket = zctx.socket(zmq.REQ)
-    socket.connect(f"tcp://{host:s}:{port:d}")
+    uri = f"tcp://{host:s}:{port:d}"
+    socket.connect(uri)
     socket.set(zmq.LINGER, 10)
+    click.echo(f"Connected to {uri}")
     return socket
 
 
-def output_streams(channel: bytes) -> Dict[bytes, IO[bytes]]:
-    return {
-        channel + b"STDERR": getattr(sys.stderr, "buffer", sys.stderr),
-        channel + b"STDOUT": getattr(sys.stdout, "buffer", sys.stdout),
-    }
+class LocalStreams:
+    def __getitem__(self, key: bytes) -> IO[bytes]:
+        if key.endswith(b"STDERR"):
+            return getattr(sys.stderr, "buffer", sys.stderr)
+        elif key.endswith(b"STDOUT"):
+            return getattr(sys.stdout, "buffer", sys.stdout)
+        else:
+            raise KeyError(key)
+
+    def __contains__(self, key: bytes) -> bool:
+        return key.endswith(b"STDOUT") or key.endswith(b"STDERR")
 
 
-def run_tox_command(
-    command: List[str], output: zmq.Socket, channel: str, tee: bool = True
+async def send_command(socket: zmq.asyncio.Socket, command: str, args: Any) -> None:
+    await socket.send_json({"command": command, "args": args})
+
+
+async def tox_command(
+    args: List[str], channel: str, output: zmq.asyncio.Socket, tee: bool = True
 ) -> subprocess.CompletedProcess:
-    """
-    Run a single tox command
-    """
+    """Cause a tox command to be run asynchronously"""
     os.environ.setdefault("PY_COLORS", "1")
-    arg_str = " ".join(command)
-    click.echo(f"[tox-server] tox {arg_str}")
-    args = ["tox"] + list(command)
-    proc = subprocess.Popen(
-        args, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0
+    arg_str = "tox " + " ".join(shlex.quote(a) for a in args)
+    log.info(f"{arg_str}")
+
+    proc = await asyncio.subprocess.create_subprocess_shell(
+        arg_str, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
+
+    assert proc.stdout is not None, "Expected to get a STDOUT stream from asyncio"
+    assert proc.stderr is not None, "Expected to get a STDERR stream from asyncio"
 
     bchan = channel.encode("utf-8")
 
-    selector = selectors.DefaultSelector()
-    selector.register(proc.stdout, events=selectors.EVENT_READ, data=bchan + b"STDOUT")
-    selector.register(proc.stderr, events=selectors.EVENT_READ, data=bchan + b"STDERR")
+    output_tasks = {
+        asyncio.create_task(
+            publish_output(proc.stdout, output, bchan + b"STDOUT", tee=tee)
+        ),
+        asyncio.create_task(
+            publish_output(proc.stderr, output, bchan + b"STDERR", tee=tee)
+        ),
+    }
 
-    streams = output_streams(channel=bchan)
+    try:
+        returncode = await proc.wait()
+    except asyncio.CancelledError:
+        proc.terminate()
+        raise
 
-    while proc.poll() is None:
-        for (key, events) in selector.select(timeout=0.01):
-            channel = key.data
-            data = cast(IO[bytes], key.fileobj).read(1024)
-            output.send_multipart([channel, data])
+    finally:
 
-            if tee:
-                localfileobj = streams[channel]
-                localfileobj.write(data)
-                localfileobj.flush()
+        log.info(f"exit={returncode}")
+        for task in output_tasks:
+            task.cancel()
 
-    return subprocess.CompletedProcess(args, returncode=proc.returncode)
+        await asyncio.wait(output_tasks)
+
+        for task in output_tasks:
+            try:
+                task.result()
+            except asyncio.CancelledError:
+                log.info("Cancelled stream")
+            except Exception:
+                log.exception("Output Exception")
+
+    log.info(f"done")
+
+    return subprocess.CompletedProcess(args, returncode=returncode)
+
+
+async def publish_output(
+    stream: asyncio.StreamReader,
+    socket: zmq.asyncio.Socket,
+    channel: bytes,
+    tee: bool = False,
+) -> None:
+    """Publish stream data to a ZMQ socket"""
+    streams = LocalStreams()
+
+    while True:
+        data = await stream.read(n=1024)
+        if data:
+            await socket.send_multipart([channel, data])
+        else:
+            # No data was recieved, but we should yield back
+            # to the event loop so we don't get stuck here.
+            # Ideally, we'd not let .read() return with 0 bytes
+            # but that doesn't seem to be possible with asyncio?
+            await asyncio.sleep(0.1)
+        if tee:
+            localstream = streams[channel]
+            localstream.write(data)
+            localstream.flush()
+
+
+async def serve_async(
+    control_uri: str, output_uri: str, zctx: Optional[zmq.asyncio.Context] = None
+) -> None:
+
+    zctx = zctx or zmq.asyncio.Context.instance()
+
+    # Control socket
+    socket = zctx.socket(zmq.REP)
+    socket.bind(control_uri)
+
+    # Output socket
+    output = zctx.socket(zmq.PUB)
+    output.bind(output_uri)
+
+    with socket, output:
+        log.info(f"asyncio implementation")
+        log.info(f"Serving on {control_uri}")
+        log.info(f"Output on {output_uri}")
+        log.info("^C to exit.")
+        while True:
+            data = await socket.recv_json()
+            cmd, args = data["command"], data["args"]
+            print(f"{cmd}: {args!r}")
+            if cmd == "QUIT":
+                await send_command(socket, "QUIT", "DONE")
+                break
+
+            elif cmd == "RUN":
+                try:
+                    task = asyncio.create_task(
+                        tox_command(args["tox"], args["channel"], output)
+                    )
+                    result = await task
+                    await send_command(
+                        socket,
+                        "RUN",
+                        {"returncode": result.returncode, "args": result.args},
+                    )
+
+                except Exception as e:
+                    await socket.send_json(
+                        {
+                            "command": "ERR",
+                            "args": {"command": cmd, "message": repr(e)},
+                        }
+                    )
+            elif cmd == "PING":
+                await socket.send_json(
+                    {"command": "PONG", "args": {"time": time.time()}}
+                )
+            else:
+                await socket.send_json(
+                    {
+                        "command": "ERR",
+                        "args": {"command": cmd, "message": "Unknown command"},
+                    }
+                )
+
 
 def unparse_arguments(args: Tuple[str, ...]) -> Tuple[str, ...]:
     """
@@ -142,6 +263,7 @@ def unparse_arguments(args: Tuple[str, ...]) -> Tuple[str, ...]:
         args = tuple(ta)
     return args
 
+
 @main.command()
 @click.option(
     "-t",
@@ -155,52 +277,16 @@ def serve(ctx: click.Context, tee: bool = True) -> None:
     Serve the tox server
     """
     cfg = ctx.find_object(dict)
-    uri = f"tcp://{cfg['bind_host']}:{cfg['port']:d}"
+    control_uri = f"tcp://{cfg['bind_host']}:{cfg['port']:d}"
+    output_uri = f"tcp://{cfg['bind_host']}:{cfg['stream_port']:d}"
 
-    zctx = zmq.Context()
-    socket = zctx.socket(zmq.REP)
-    socket.bind(uri)
-
-    stream_uri = f"tcp://{cfg['bind_host']}:{cfg['stream_port']:d}"
-    output = zctx.socket(zmq.PUB)
-    output.bind(stream_uri)
-
-    with socket, output:
-        click.echo(f"[tox-server] Serving on {uri}")
-        click.echo(f"[tox-server] Output on {stream_uri}")
-        click.echo("[tox-server] ^C to exit.")
-        while True:
-            if not socket.poll(timeout=1000):
-                continue
-            cmd, args = recv(socket, timeout=0)
-            if cmd == "QUIT":
-                break
-            elif cmd == "RUN":
-                try:
-                    if not all(isinstance(arg, str) for arg in args):
-                        send(socket, "ERR", repr(TypeError(args)))
-                        continue
-                    r = run_tox_command(
-                        args["tox"], output, channel=args["channel"], tee=tee
-                    )
-                except Exception as e:
-                    send(socket, "ERR", repr(e))
-                else:
-                    send(socket, "RUN", {"returncode": r.returncode, "args": r.args})
-
-            elif cmd == "PING":
-
-                send(socket, "PONG", {"time": time.time()})
-            else:
-                send(socket, "ERR", repr(ValueError(f"Unknown command: {cmd}")))
-
-        send(socket, "DONE", "DONE")
+    asyncio.run(serve_async(control_uri, output_uri))
 
 
 @main.command(context_settings=dict(ignore_unknown_options=True))
 @click.pass_context
 @click.argument("tox_args", nargs=-1, type=click.UNPROCESSED)
-def run(ctx: click.Context, tox_args: Tuple[bytes]) -> None:
+def run(ctx: click.Context, tox_args: Tuple[str, ...]) -> None:
     """
     Run a tox command on the server.
 
@@ -218,7 +304,7 @@ def run(ctx: click.Context, tox_args: Tuple[bytes]) -> None:
     output.subscribe(channel.encode("utf-8"))
 
     poller = zmq.Poller()
-    streams = output_streams(channel.encode("utf-8"))
+    streams = LocalStreams()
 
     start = time.monotonic()
 
@@ -247,7 +333,7 @@ def run(ctx: click.Context, tox_args: Tuple[bytes]) -> None:
             click.echo(repr(info), err=True)
             raise click.Abort()
         elif reply == "RUN":
-            response = subprocess.CompletedProcess(
+            response: subprocess.CompletedProcess = subprocess.CompletedProcess(
                 args=info["args"], returncode=info["returncode"]
             )
     if response.returncode == 0:

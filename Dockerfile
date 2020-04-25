@@ -1,14 +1,21 @@
-FROM python3:latest
+FROM python:3.7
 
-COPY requirements.txt /tmp/requirements.txt
-RUN pip install -r requirements.txt
-COPY tox_server.py /usr/bin/tox-server
-RUN chmod +x /usr/bin/tox-server
+COPY ./requirements.txt /tmp/requirements.txt
+RUN pip install -r /tmp/requirements.txt
+RUN mkdir -p /src
+COPY . /src/
+RUN pip install -e /src/
 
 RUN mkdir -p /app
 
 WORKDIR /app
+COPY ./example/ /app/
 
 EXPOSE 7654
+ENV TOX_SERVER_PORT=7654
 EXPOSE 7655
-ENTRYPOINT ["python3", "/usr/bin/tox-server", "serve"]
+ENV TOX_SERVER_STREAM_PORT=7655
+
+ENV TOX_SERVER_BIND_HOST='0.0.0.0'
+
+ENTRYPOINT ["tox-server", "serve"]

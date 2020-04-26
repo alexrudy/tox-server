@@ -138,11 +138,12 @@ async def check_command(
     )
 
     (done, pending) = await asyncio.wait(
-        (server_task, commander), timeout=0.2, return_when=asyncio.ALL_COMPLETED
+        (server_task, commander), timeout=0.1, return_when=asyncio.ALL_COMPLETED
     )
 
     server_task.cancel()
-    await asyncio.wait_for(server_task, timeout=1.0)
+    commander.cancel()
+
     assert commander in done
 
     rv = commander.result()

@@ -9,13 +9,18 @@ import os
 import shlex
 import subprocess
 import sys
+import functools
+import signal
+import contextlib
 import time
 from typing import Any
 from typing import IO
 from typing import List
 from typing import Optional
 from typing import Tuple
-
+from typing import Dict
+from typing import Callable
+from typing import Iterator
 import click
 import zmq.asyncio
 
@@ -34,9 +39,11 @@ class Command(enum.Enum):
     PONG = enum.auto()
     RUN = enum.auto()
     OUTPUT = enum.auto()
+    CANCEL = enum.auto()
+    INFO = enum.auto()
 
 
-@dc.dataclass
+@dc.dataclass(frozen=True)
 class Message:
 
     command: Command
@@ -87,6 +94,12 @@ class Message:
 
     def respond(self, command: Command, args: Any) -> "Message":
         return self.__class__(command=command, args=args, identifiers=self.identifiers)
+
+    @property
+    def identifier(self) -> Tuple[bytes, ...]:
+        if not self.identifiers:
+            return (b"",)
+        return tuple(self.identifiers)
 
 
 @dc.dataclass
@@ -206,7 +219,7 @@ async def tox_command(
         returncode = await proc.wait()
     except asyncio.CancelledError:
         proc.terminate()
-        raise
+        returncode = await proc.wait()
 
     finally:
 
@@ -269,47 +282,70 @@ class Server:
         self.control_uri = control_uri
         self.zctx = zctx or zmq.asyncio.Context()
 
-        self.running = False
+        self.tasks: Dict[Tuple[bytes, ...], asyncio.Future] = {}
+        self._timeout = 0.1
 
     async def run_forever(self) -> None:
-        self.running = True
+        self.shutdown = asyncio.Event()
+        self.lock = asyncio.Lock()
+        self.tasks = {}
 
         self.socket = self.zctx.socket(zmq.ROUTER)
         self.socket.bind(self.control_uri)
 
         log.info(f"Running server at {self.control_uri}")
         log.info(f"^C to exit")
+        self._tevnt: asyncio.Future = asyncio.ensure_future(self.shutdown.wait())
         try:
-            while self.running:
-                await self.handle()
+            await self.process()
         except asyncio.CancelledError:
             log.info("Server cancelled")
         except BaseException:
             log.exception("Server loop error")
             raise
         finally:
+            self._tevnt.cancel()
+            if self.tasks:
+                log.warn(f"{len(self.tasks)} tasks remaining")
             self.socket.close()
         log.debug(f"Server is done.")
 
     async def send(self, message: Message) -> None:
-        log.debug(f".send {message!r}")
+        log.debug(f"Send: {message!r}")
         await self.socket.send_multipart(message.assemble())
 
-    async def handle(self) -> None:
-        data = await self.socket.recv_multipart()
-        log.debug(f"Data: {data!r}")
+    async def process(self) -> None:
 
+        while not self.shutdown.is_set():
+            trecv: asyncio.Future = asyncio.ensure_future(self.recv())
+            done, pending = await asyncio.wait(
+                (trecv, self._tevnt), return_when=asyncio.FIRST_COMPLETED,
+            )
+
+            trecv.cancel()
+            if trecv in done:
+                with contextlib.suppress(ProtocolError):
+                    msg = await trecv
+                    self.tasks[msg.identifier] = asyncio.ensure_future(self.handle(msg))
+
+        await asyncio.wait((self._tevnt, *self.tasks.values()))
+
+    async def recv(self) -> Message:
+        data = await self.socket.recv_multipart()
         try:
             msg = Message.parse(data)
         except ProtocolError as e:
             log.critical("Protocol error")
             await self.send(e.message)
-            return
+            raise
         except ProtocolFailure:
             log.critical("Protocol failure")
             raise
 
         log.debug(f"Message: {msg!r}")
+        return msg
+
+    async def handle(self, msg: Message) -> None:
 
         try:
             await getattr(self, f"handle_{msg.command.name.lower()}")(msg)
@@ -317,10 +353,24 @@ class Server:
             log.exception("Error in handler")
             err = msg.respond(command=Command.ERR, args={"message": str(e)})
             await self.send(err)
+        finally:
+            value = self.tasks.pop(msg.identifier, None)
+            log.debug(f"Ended task: {value!r}")
+
+    async def handle_cancel(self, msg: Message) -> None:
+        """Cancel a running tox"""
+        task = self.tasks.pop(msg.identifier, None)
+        if task:
+            task.cancel()
+            await self.send(await task)
+        else:
+            await self.send(
+                msg.respond(Command.ERR, {"message": "Could not find task"},)
+            )
 
     async def handle_run(self, msg: Message) -> None:
-        result = await tox_command(msg.args["tox"], self.socket, msg)
-
+        async with self.lock:
+            result = await tox_command(msg.args["tox"], self.socket, msg)
         await self.send(
             msg.respond(
                 Command.RUN, {"returncode": result.returncode, "args": result.args}
@@ -328,8 +378,8 @@ class Server:
         )
 
     async def handle_quit(self, msg: Message) -> None:
-        self.running = False
-
+        self.shutdown.set()
+        log.debug("Requesting shutdown")
         await self.send(msg.respond(Command.QUIT, "DONE"))
 
     async def handle_ping(self, msg: Message) -> None:
@@ -388,22 +438,62 @@ async def run_command(
     client.connect(control_uri)
 
     message = Message(command=Command.RUN, args={"tox": tox_args}, identifiers=[b""],)
-    streams = LocalStreams()
 
-    with client:
+    with interrupt_handler(
+        signal.SIGINT, functools.partial(send_interrupt, client=client)
+    ), client:
 
         await client.send_multipart(message.assemble())
+        msg = await process_run(client)
 
-        while True:
-            data = await client.recv_multipart()
-            msg = Message.parse(data)
-            if msg.command == Command.OUTPUT:
-                stream = streams[Stream[msg.args["stream"]]]
-                stream.write(base64.b85decode(msg.args["data"]))
-                stream.flush()
-            else:
-                break
+    return msg
 
+
+@contextlib.contextmanager
+def interrupt_handler(sig: int, task_factory: Callable) -> Iterator[None]:
+
+    if hasattr(asyncio, "get_running_loop"):
+        loop = asyncio.get_running_loop()
+    else:
+        loop = asyncio.get_event_loop()
+
+    loop.add_signal_handler(
+        sig,
+        functools.partial(
+            signal_interrupt_handler, loop=loop, task_factory=task_factory
+        ),
+    )
+
+    yield
+
+    loop.remove_signal_handler(sig)
+
+
+async def send_interrupt(client: zmq.asyncio.Socket) -> None:
+    interrupt = Message(command=Command.CANCEL, args=None, identifiers=[b""])
+    log.critical(f"Sending interrupt: {interrupt!r}")
+    await client.send_multipart(interrupt.assemble())
+
+
+def signal_interrupt_handler(
+    loop: asyncio.AbstractEventLoop, task_factory: Callable,
+) -> None:
+    loop.create_task(task_factory())
+
+
+async def process_run(client: zmq.asyncio.Socket) -> Message:
+    streams = LocalStreams()
+    while True:
+        data = await client.recv_multipart()
+        msg = Message.parse(data)
+        if msg.command == Command.OUTPUT:
+            stream = streams[Stream[msg.args["stream"]]]
+            stream.write(base64.b85decode(msg.args["data"]))
+            stream.flush()
+        elif msg.command == Command.RUN:
+            break
+        elif msg.command == Command.ERR:
+            break
     return msg
 
 

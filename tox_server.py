@@ -141,6 +141,9 @@ class Message:
         """Create a response message object, which retains message identifiers"""
         return dc.replace(self, command=command, args=args)
 
+    def cancel(self) -> "Message":
+        return dc.replace(self, command=Command.CANCEL, args={"command": self.command.name})
+
     @property
     def identifier(self) -> Tuple[bytes, ...]:
         """An immutable set of message identifiers"""
@@ -448,7 +451,8 @@ class Server:
         it will be cancelled. Any task can be cancelled, but this is really
         only useful for cancelling RUN tasks.
         """
-        task = self.tasks.pop((Command.RUN, msg.identifier), None)
+        target = Command[msg.args["command"]]
+        task = self.tasks.pop((target, msg.identifier), None)
         if task:
             log.debug(f"Cancelling {task!r}")
             task.cancel()
@@ -599,7 +603,9 @@ async def client(
     client.connect(uri)
     client.setsockopt(zmq.LINGER, 0)
 
-    with interrupt_handler(signal.SIGINT, functools.partial(send_interrupt, socket=client), oneshot=True), client:
+    sigint_callback = functools.partial(send_interrupt, socket=client, message=message)
+
+    with interrupt_handler(signal.SIGINT, sigint_callback, oneshot=True), client:
 
         await message.for_dealer().send(client)
 
@@ -649,10 +655,10 @@ def interrupt_handler(sig: int, task_factory: Callable[[], Awaitable[Any]], ones
     loop.remove_signal_handler(sig)
 
 
-async def send_interrupt(socket: zmq.asyncio.Socket) -> None:
+async def send_interrupt(socket: zmq.asyncio.Socket, message: Message) -> None:
     """Helper function to send a cancel message using the provided socket"""
-    interrupt = Message(command=Command.CANCEL, args=None, identifiers=(b"",))
-    log.info(f"Sending interrupt: {interrupt!r}")
+    interrupt = message.cancel().for_dealer()
+    log.debug(f"Sending interrupt: {interrupt!r}")
     click.echo("", err=True)
     click.echo(f"Cancelling {command_name()} with the server. ^C again to exit.", err=True)
     await interrupt.send(socket)

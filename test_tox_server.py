@@ -276,8 +276,7 @@ async def test_client_interrupt(
         msg = ts.Message(command=ts.Command.RUN, args={"tox": []})
         await msg.for_dealer().send(socket)
 
-        msg = ts.Message(command=ts.Command.CANCEL, args=None)
-        await msg.for_dealer().send(socket)
+        await msg.cancel().for_dealer().send(socket)
 
         process.returncode.set_result(5)
 
@@ -305,9 +304,7 @@ async def test_client_interrupt_finished_task(
 
         await asyncio.sleep(0.1)
 
-        cancel_msg = ts.Message(command=ts.Command.CANCEL, args=None)
-        ts.log.debug(f"CSend: {cancel_msg}")
-        await cancel_msg.for_dealer().send(socket)
+        await msg.cancel().for_dealer().send(socket)
 
         response = await ts.Message.recv(socket)
         assert response.command == ts.Command.ERR
@@ -350,7 +347,7 @@ async def test_client_repeat_task(
     with zctx.socket(zmq.DEALER) as socket:
         socket.connect(uri.connect)
 
-        cancel_msg = ts.Message(command=ts.Command.CANCEL, args=None)
+        cancel_msg = ts.Message(command=ts.Command.CANCEL, args={"command": "RUN"})
         ts.log.debug(f"CSend: {cancel_msg}")
         await cancel_msg.for_dealer().send(socket)
 

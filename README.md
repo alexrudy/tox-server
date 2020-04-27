@@ -1,5 +1,6 @@
 # Tox Server
 
+[![PyPI version](https://badge.fury.io/py/tox-server.svg)](https://badge.fury.io/py/tox-server)
 ![Tests](https://github.com/alexrudy/tox-server/workflows/Tox%20Server%20Tests/badge.svg)
 
 `tox-server` is a command line tool which runs [tox](https://tox.readthedocs.io/en/latest/) in a loop
@@ -12,10 +13,8 @@ helpful if your tests have to be run inside another environment with some setup 
 You can use `pip` to install `tox-server`:
 
 ```
-$ pip install git+https://github.com/alexrudy/tox-server.git@master
+$ pip install tox-server
 ```
-
-(It will be published on pypi soon)
 
 ## Run the server
 

@@ -353,7 +353,7 @@ class Server:
             await self.drain()
         except asyncio.CancelledError:
             log.info("Server cancelled")
-        except BaseException:  # pragma: nocover
+        except BaseException:
             log.exception("Server loop error")
             raise
         finally:
@@ -692,7 +692,7 @@ def run_client(uri: str, message: Message, timeout: Optional[float] = None) -> M
         click.echo("", err=True)
         click.echo(f"Command {command_name()} interrupted!", err=True)
         raise SystemExit(3)
-    except BaseException:  # pragma: nocover
+    except BaseException:
         log.exception("Unhandled exception in asyncio loop")
         raise
     else:

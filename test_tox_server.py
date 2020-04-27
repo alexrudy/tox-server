@@ -1,17 +1,17 @@
 import asyncio
-import dataclasses as dc
-import json
-import sys
-import functools
-import multiprocessing as mp
-from typing import Any
-from typing import Awaitable
-from typing import AsyncIterator
-from typing import Tuple
-import unittest.mock as mock
 import contextlib
-import click.testing
+import dataclasses as dc
+import functools
+import json
+import multiprocessing as mp
+import sys
+import unittest.mock as mock
+from typing import Any
+from typing import AsyncIterator
+from typing import Awaitable
+from typing import Tuple
 
+import click.testing
 import pytest
 import zmq.asyncio
 
@@ -182,7 +182,7 @@ async def server(process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
 
 
 async def check_command(
-    command: str, args: Any, uri: URI, zctx: zmq.asyncio.Context, process: SubprocessManager,
+    command: str, args: Any, uri: URI, zctx: zmq.asyncio.Context, process: SubprocessManager
 ) -> Tuple[ts.Message, bool]:
 
     async with run_server(uri.bind, zctx) as server_task:
@@ -224,11 +224,11 @@ IGNORE = object()
     [
         ("QUIT", None, "QUIT", "DONE"),
         ("PING", None, "PING", IGNORE),
-        ("RUN", {"tox": ["foo"], "channel": "bar"}, "RUN", {"returncode": 0, "args": ["foo"]},),
+        ("RUN", {"tox": ["foo"], "channel": "bar"}, "RUN", {"returncode": 0, "args": ["foo"]}),
     ],
     ids=["QUIT", "PING", "RUN"],
 )
-async def test_serve(command, args, rcommand, rargs, process, uri, zctx,) -> None:
+async def test_serve(command, args, rcommand, rargs, process, uri, zctx) -> None:
     rv, finished = await check_command(command, args, uri, zctx, process)
     assert finished == (command == "QUIT")
     assert rv.command.name == rcommand
@@ -237,7 +237,7 @@ async def test_serve(command, args, rcommand, rargs, process, uri, zctx,) -> Non
 
 
 @mark_asyncio_timeout(1)
-async def test_client_run(process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context,) -> None:
+async def test_client_run(process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context) -> None:
 
     async with run_server(uri.bind, zctx) as server_task:
 

@@ -1,27 +1,28 @@
 #!/usr/bin/env python3
 import asyncio
 import base64
+import contextlib
 import dataclasses as dc
 import enum
+import functools
 import json
 import logging
 import os
 import shlex
+import signal
 import subprocess
 import sys
-import functools
-import signal
-import contextlib
 import time
 from typing import Any
 from typing import Awaitable
+from typing import Callable
+from typing import Dict
 from typing import IO
+from typing import Iterator
 from typing import List
 from typing import Optional
 from typing import Tuple
-from typing import Dict
-from typing import Callable
-from typing import Iterator
+
 import click
 import zmq.asyncio
 
@@ -187,7 +188,7 @@ class ProtocolFailure(Exception):
 
 
 async def tox_command(
-    args: List[str], output: zmq.asyncio.Socket, message: Message, tee: bool = True,
+    args: List[str], output: zmq.asyncio.Socket, message: Message, tee: bool = True
 ) -> subprocess.CompletedProcess:
     """Cause a tox command to be run asynchronously.
 
@@ -253,7 +254,7 @@ async def tox_command(
 
 
 async def publish_output(
-    reader: asyncio.StreamReader, socket: zmq.asyncio.Socket, message: Message, stream: Stream, tee: bool = False,
+    reader: asyncio.StreamReader, socket: zmq.asyncio.Socket, message: Message, stream: Stream, tee: bool = False
 ) -> None:
     """Publish stream data to a ZMQ socket.
 
@@ -277,7 +278,7 @@ async def publish_output(
         data = await reader.read(n=1024)
         if data:
             message = message.respond(
-                Command.OUTPUT, args={"data": base64.b85encode(data).decode("ascii"), "stream": stream.name},
+                Command.OUTPUT, args={"data": base64.b85encode(data).decode("ascii"), "stream": stream.name}
             )
             await message.send(socket)
         else:
@@ -305,7 +306,7 @@ class Server:
 
     """
 
-    def __init__(self, uri: str, tee: bool = False, zctx: Optional[zmq.asyncio.Context] = None,) -> None:
+    def __init__(self, uri: str, tee: bool = False, zctx: Optional[zmq.asyncio.Context] = None) -> None:
         self.uri = uri
         self.tee = tee
         self.zctx = zctx or zmq.asyncio.Context()
@@ -453,7 +454,7 @@ class Server:
             task.cancel()
         else:
             log.debug(f"Task to cancel not found: {msg!r}")
-            await self.send(msg.respond(Command.ERR, {"message": "Could not find task"},))
+            await self.send(msg.respond(Command.ERR, {"message": "Could not find task"}))
 
     async def handle_run(self, msg: Message) -> None:
         """Handles a run message to start a tox subprocess.
@@ -499,11 +500,9 @@ def unparse_arguments(args: Tuple[str, ...]) -> Tuple[str, ...]:
 
 
 @click.group()
+@click.option("-p", "--port", type=int, envvar="TOX_SERVER_PORT", help="Port to connect for tox-server.", required=True)
 @click.option(
-    "-p", "--port", type=int, envvar="TOX_SERVER_PORT", help="Port to connect for tox-server.", required=True,
-)
-@click.option(
-    "-h", "--host", type=str, envvar="TOX_SERVER_HOST", default="localhost", help="Host to connect for tox-server.",
+    "-h", "--host", type=str, envvar="TOX_SERVER_HOST", default="localhost", help="Host to connect for tox-server."
 )
 @click.option(
     "-b",
@@ -533,9 +532,7 @@ def main(ctx: click.Context, host: str, port: int, bind_host: str, timeout: Opti
 
 
 @main.command()
-@click.option(
-    "-t", "--tee/--no-tee", default=True, help="Write output locally as well as transmitting.",
-)
+@click.option("-t", "--tee/--no-tee", default=True, help="Write output locally as well as transmitting.")
 @click.pass_context
 def serve(ctx: click.Context, tee: bool = True) -> None:
     """
@@ -554,7 +551,7 @@ def serve(ctx: click.Context, tee: bool = True) -> None:
 
 
 async def client(
-    uri: str, message: Message, timeout: Optional[float] = None, zctx: Optional[zmq.asyncio.Context] = None,
+    uri: str, message: Message, timeout: Optional[float] = None, zctx: Optional[zmq.asyncio.Context] = None
 ) -> Message:
     """Manage client connection to tox-server
 
@@ -613,9 +610,7 @@ def interrupt_handler(sig: int, task_factory: Callable[[], Awaitable[Any]]) -> I
     """
     loop = asyncio.get_running_loop()
 
-    loop.add_signal_handler(
-        sig, functools.partial(signal_interrupt_handler, loop=loop, task_factory=task_factory),
-    )
+    loop.add_signal_handler(sig, functools.partial(signal_interrupt_handler, loop=loop, task_factory=task_factory))
 
     yield
 
@@ -629,7 +624,7 @@ async def send_interrupt(socket: zmq.asyncio.Socket) -> None:
     await interrupt.send(socket)
 
 
-def signal_interrupt_handler(loop: asyncio.AbstractEventLoop, task_factory: Callable,) -> None:
+def signal_interrupt_handler(loop: asyncio.AbstractEventLoop, task_factory: Callable) -> None:
     """
     Callback used for :meth:`asyncio.AbstractEventLoop.add_signal_handler`
     to schedule a coroutine when a signal is recieved.

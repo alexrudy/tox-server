@@ -149,12 +149,12 @@ class Message:
         return tuple(self.identifiers)
 
     @classmethod
-    async def recv(cls, socket: zmq.asyncio.Socket, flags=0) -> "Message":
+    async def recv(cls, socket: zmq.asyncio.Socket, flags: int = 0) -> "Message":
         """Recieve a message on the provided socket"""
         data = await socket.recv_multipart(flags=flags)
         return cls.parse(data)
 
-    async def send(self, socket: zmq.asyncio.Socket, flags=0) -> None:
+    async def send(self, socket: zmq.asyncio.Socket, flags: int = 0) -> None:
         """Send a message on the provided socket"""
         await socket.send_multipart(self.assemble(), flags=flags)
 

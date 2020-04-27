@@ -9,7 +9,11 @@ import unittest.mock as mock
 from typing import Any
 from typing import AsyncIterator
 from typing import Awaitable
+from typing import Callable
+from typing import Iterator
+from typing import List
 from typing import Tuple
+from typing import TypeVar
 
 import click.testing
 import pytest
@@ -22,12 +26,14 @@ if sys.version_info < (3, 8):
     # so we grab the backported version from pypi
     import mock  # type: ignore  # noqa: F811
 
+F = TypeVar("F", bound=Callable)
 
-def mark_asyncio_timeout(timeout):
-    def _inner(f):
+
+def mark_asyncio_timeout(timeout: int) -> Callable:
+    def _inner(f: F) -> F:
         @pytest.mark.asyncio
         @functools.wraps(f)
-        async def wrapper(*args, **kwargs):
+        async def wrapper(*args: Any, **kwargs: Any) -> Any:
             return await asyncio.wait_for(f(*args, **kwargs), timeout=timeout)
 
         return wrapper
@@ -52,7 +58,7 @@ def test_local_streams(stream: ts.Stream) -> None:
 
 @pytest.fixture()
 def mock_publisher() -> zmq.asyncio.Socket:
-    async def publish(message, flags=0):
+    async def publish(message: List[bytes], flags: int = 0) -> None:
         # Black-hole sent messages
         return
 
@@ -66,7 +72,7 @@ def mock_publisher() -> zmq.asyncio.Socket:
 def mock_stream() -> asyncio.StreamReader:
     first = True
 
-    async def reader(n=1):
+    async def reader(n: int = 1) -> bytes:
         nonlocal first
         if first:
             first = False
@@ -80,7 +86,7 @@ def mock_stream() -> asyncio.StreamReader:
 
 
 @pytest.fixture()
-def zctx():
+def zctx() -> zmq.asyncio.Context:
 
     context = zmq.asyncio.Context()
     yield context
@@ -112,12 +118,12 @@ class URI:
 
 
 @pytest.fixture(params=["inproc", "tcp"])
-def protocol(request) -> str:
+def protocol(request: Any) -> str:
     return request.param
 
 
 @pytest.fixture
-def uri(protocol, unused_tcp_port) -> URI:
+def uri(protocol: str, unused_tcp_port: int) -> URI:
     if protocol == "inproc":
         return URI("inproc://control", "inproc://control")
     elif protocol == "tcp":
@@ -133,7 +139,7 @@ class SubprocessManager:
 
 
 @pytest.fixture
-async def process(monkeypatch, event_loop) -> SubprocessManager:
+async def process(monkeypatch: Any, event_loop: Any) -> SubprocessManager:
 
     returncode: asyncio.Future[int] = event_loop.create_future()
 
@@ -143,7 +149,7 @@ async def process(monkeypatch, event_loop) -> SubprocessManager:
         ts.log.debug(f"Got returncode: {rc}")
         return rc
 
-    def proc_terminate():
+    def proc_terminate() -> None:
         if not returncode.done():
             returncode.set_result(-1)
 
@@ -151,7 +157,7 @@ async def process(monkeypatch, event_loop) -> SubprocessManager:
     css.return_value = proc = mock.AsyncMock(spec=asyncio.subprocess.Process)  # type: ignore
     proc.stdout = mock.Mock()
     proc.stderr = mock.Mock()
-    proc.wait.side_effect = proc_wait  # type: ignore
+    proc.wait.side_effect = proc_wait
     proc.terminate.side_effect = proc_terminate
     monkeypatch.setattr(asyncio.subprocess, "create_subprocess_shell", css)
     return SubprocessManager(returncode, proc, css)
@@ -228,7 +234,9 @@ IGNORE = object()
     ],
     ids=["QUIT", "PING", "RUN"],
 )
-async def test_serve(command, args, rcommand, rargs, process, uri, zctx) -> None:
+async def test_serve(
+    command: str, args: Any, rcommand: str, rargs: Any, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
+) -> None:
     rv, finished = await check_command(command, args, uri, zctx, process)
     assert finished == (command == "QUIT")
     assert rv.command.name == rcommand
@@ -392,7 +400,7 @@ async def test_server_quit_and_drain(
 
 
 @contextlib.contextmanager
-def server_in_process(port):
+def server_in_process(port: int) -> Iterator[mp.Process]:
     (recv, send) = mp.Pipe()
     proc = mp.Process(target=_server_process_target, args=(port, send), name="test-tox-server")
     proc.start()
@@ -421,7 +429,7 @@ def _server_process_target(port: int, chan: Any) -> None:
     chan.send(ProcessResult(result.exit_code, result.output))
 
 
-def test_cli_quit(unused_tcp_port):
+def test_cli_quit(unused_tcp_port: int) -> None:
 
     with server_in_process(unused_tcp_port):
 
@@ -432,7 +440,7 @@ def test_cli_quit(unused_tcp_port):
         assert "DONE" in result.output
 
 
-def test_cli_ping(unused_tcp_port):
+def test_cli_ping(unused_tcp_port: int) -> None:
 
     with server_in_process(unused_tcp_port):
 
@@ -445,7 +453,7 @@ def test_cli_ping(unused_tcp_port):
         assert result.exit_code == 0
 
 
-def test_cli_run_help(unused_tcp_port):
+def test_cli_run_help(unused_tcp_port: int) -> None:
 
     with server_in_process(unused_tcp_port):
 
@@ -458,7 +466,7 @@ def test_cli_run_help(unused_tcp_port):
         assert result.exit_code == 0
 
 
-def test_cli_run_unknown_argument(unused_tcp_port):
+def test_cli_run_unknown_argument(unused_tcp_port: int) -> None:
 
     with server_in_process(unused_tcp_port):
 
@@ -472,21 +480,21 @@ def test_cli_run_unknown_argument(unused_tcp_port):
 
 
 class TestMessage:
-    def test_parse_empty(self):
+    def test_parse_empty(self) -> None:
 
         with pytest.raises(ts.ProtocolFailure):
             ts.Message.parse([])
 
-    def test_parse_invalid_identifiers(self):
+    def test_parse_invalid_identifiers(self) -> None:
 
         with pytest.raises(ts.ProtocolFailure):
             ts.Message.parse([b"identifier", b"data"])
 
-    def test_parse_invalid_json(self):
+    def test_parse_invalid_json(self) -> None:
         with pytest.raises(ts.ProtocolError):
             ts.Message.parse([b"identifier", b"", b"{data"])
 
-    def test_parse_missing_args(self):
+    def test_parse_missing_args(self) -> None:
 
         data = json.dumps({"command": "BAZ"}).encode("utf-8")
         with pytest.raises(ts.ProtocolError) as exc_info:
@@ -494,14 +502,14 @@ class TestMessage:
         assert exc_info.value.message.args["message"] == "JSON missing key: 'args'"
         assert str(exc_info.value) == "JSON missing key: 'args'"
 
-    def test_parse_invalid_command(self):
+    def test_parse_invalid_command(self) -> None:
         data = json.dumps({"command": "BAZ", "args": None}).encode("utf-8")
         with pytest.raises(ts.ProtocolError) as exc_info:
             ts.Message.parse([b"identifier", b"", data])
         assert exc_info.value.message.args["message"] == "Unknown command: BAZ"
         assert str(exc_info.value) == "Unknown command: BAZ"
 
-    def test_identifier_default(self):
+    def test_identifier_default(self) -> None:
         data = json.dumps({"command": "PING", "args": None}).encode("utf-8")
         msg = ts.Message.parse([data])
         assert not msg.identifiers

@@ -1,2 +1,0 @@
-def frobulate() -> None:
-    pass

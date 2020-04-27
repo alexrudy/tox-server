@@ -14,6 +14,7 @@ import signal
 import contextlib
 import time
 from typing import Any
+from typing import Awaitable
 from typing import IO
 from typing import List
 from typing import Optional
@@ -28,94 +29,154 @@ log = logging.getLogger(__name__)
 
 
 class Stream(enum.Enum):
+    """Stream switch for output"""
+
     STDOUT = enum.auto()
     STDERR = enum.auto()
 
+    def _get_stream(self) -> IO[bytes]:
+        """Return the stream object"""
+        if self == Stream.STDERR:
+            return getattr(sys.stderr, "buffer", sys.stderr)
+        elif self == Stream.STDOUT:
+            return getattr(sys.stdout, "buffer", sys.stdout)
+        else:  # pragma: nocover
+            raise ValueError(self)
+
+    def fwrite(self, data: bytes) -> None:
+        """Write and flush this stream"""
+        s = self._get_stream()
+        s.write(data)
+        s.flush()
+
 
 class Command(enum.Enum):
+    """Intended effect of a command sent via ZMQ"""
+
     ERR = enum.auto()
+    #: Indicates an error in command processing
+
     QUIT = enum.auto()
+    #: Tells the server to quit
+
     PING = enum.auto()
-    PONG = enum.auto()
+    #: Asks the server for a heartbeat
+
     RUN = enum.auto()
+    #: Run a tox command
+
     OUTPUT = enum.auto()
+    #: Indicates tox output
+
     CANCEL = enum.auto()
-    INFO = enum.auto()
+    #: Cancel a running tox command
 
 
 @dc.dataclass(frozen=True)
 class Message:
+    """Protocol message format"""
 
     command: Command
-    args: Any
+    #: Message command
 
-    identifiers: Optional[List[bytes]] = None
+    args: Any
+    #: JSON-serializable arguments to this message
+
+    identifiers: Optional[Tuple[bytes, ...]] = None
+    #: ZMQ-specific socket identifiers
 
     @classmethod
     def parse(cls, message: List[bytes]) -> "Message":
+        """Parse a list of ZMQ message frames
+
+        Ensurses that the frames correspond to this protocol.
+
+        Raises
+        ------
+        ProtocolFailure: When the message frames don't contain
+            enough data to provide a safe response.
+        ProtocolError: An error with the message frames, with a
+            reply message indicating what went wrong.
+
+        """
         if not message:
             raise ProtocolFailure("No message parts recieved")
 
         *identifiers, mpart = message
 
+        if mpart == b"" and ((not identifiers) or identifiers[-1] != b""):
+            raise ProtocolError.from_message(
+                message=f"Invalid message missing content", identifiers=tuple(identifiers) + (b"",)
+            )
+
         if identifiers and not identifiers[-1] == b"":
-            raise ProtocolFailure(f"Invalid multipart identifiers: {identifiers!r}")
+            raise ProtocolFailure(f"Invalid multipart identifiers missing delimiter: {identifiers!r}")
 
         try:
             mdata = json.loads(mpart)
         except (TypeError, ValueError) as e:
-            raise ProtocolError.from_message(
-                message=f"JSON decode error: {e}", identifiers=identifiers
-            )
+            raise ProtocolError.from_message(message=f"JSON decode error: {e}", identifiers=tuple(identifiers))
 
         try:
             command, args = mdata["command"], mdata["args"]
         except KeyError as e:
-            raise ProtocolError.from_message(
-                message=f"JSON missing key: {e}", identifiers=identifiers
-            )
+            raise ProtocolError.from_message(message=f"JSON missing key: {e}", identifiers=tuple(identifiers))
 
         try:
             command = Command[command]
         except KeyError:
-            raise ProtocolError.from_message(
-                message=f"Unknown command: {command}", identifiers=identifiers
-            )
+            raise ProtocolError.from_message(message=f"Unknown command: {command}", identifiers=tuple(identifiers))
 
-        return cls(command=command, args=args, identifiers=identifiers)
+        return cls(command=command, args=args, identifiers=tuple(identifiers))
 
     def assemble(self) -> List[bytes]:
-        message = json.dumps({"command": self.command.name, "args": self.args}).encode(
-            "utf-8"
-        )
+        """Assemble this message for sending"""
+        message = json.dumps({"command": self.command.name, "args": self.args}).encode("utf-8")
         if self.identifiers:
-            return self.identifiers + [message]
+            return list(self.identifiers) + [message]
         return [message]
 
     def respond(self, command: Command, args: Any) -> "Message":
-        return self.__class__(command=command, args=args, identifiers=self.identifiers)
+        """Create a response message object, which retains message identifiers"""
+        return dc.replace(self, command=command, args=args)
 
     @property
     def identifier(self) -> Tuple[bytes, ...]:
+        """An immutable set of message identifiers"""
         if not self.identifiers:
             return (b"",)
         return tuple(self.identifiers)
 
+    @classmethod
+    async def recv(cls, socket: zmq.asyncio.Socket, flags=0) -> "Message":
+        """Recieve a message on the provided socket"""
+        data = await socket.recv_multipart(flags=flags)
+        return cls.parse(data)
+
+    async def send(self, socket: zmq.asyncio.Socket, flags=0) -> None:
+        """Send a message on the provided socket"""
+        await socket.send_multipart(self.assemble(), flags=flags)
+
+    def for_dealer(self) -> "Message":
+        return dc.replace(self, identifiers=tuple([b""] + list(self.identifiers or [])))
+
 
 @dc.dataclass
 class ProtocolError(Exception):
+    """Error raised for a recoverable protocol problem.
+
+    The :attr:`message` provides an error message to send back to the client.
+    """
+
     message: Message
 
     def __str__(self) -> str:
         return self.message.args["message"]
 
     @classmethod
-    def from_message(
-        cls, message: str, identifiers: Optional[List[bytes]] = None
-    ) -> "ProtocolError":
-        return cls(
-            message=Message(Command.ERR, {"message": message}, identifiers=identifiers)
-        )
+    def from_message(cls, message: str, identifiers: Optional[Tuple[bytes, ...]] = None) -> "ProtocolError":
+        """Build a protocol error from a string message"""
+        return cls(message=Message(Command.ERR, {"message": message}, identifiers=identifiers))
 
 
 @dc.dataclass
@@ -125,76 +186,30 @@ class ProtocolFailure(Exception):
     message: str
 
 
-@click.group()
-@click.option(
-    "-p",
-    "--port",
-    type=int,
-    envvar="TOX_SERVER_PORT",
-    help="Port to connect for tox-server",
-    required=True,
-)
-@click.option(
-    "-h",
-    "--host",
-    type=str,
-    envvar="TOX_SERVER_HOST",
-    default="localhost",
-    help="Host to connect for tox-server",
-)
-@click.option(
-    "-b",
-    "--bind-host",
-    type=str,
-    envvar="TOX_SERVER_BIND_HOST",
-    default="127.0.0.1",
-    help="Host to connect for tox-server",
-)
-@click.pass_context
-def main(ctx: click.Context, host: str, port: int, bind_host: str) -> None:
-    """Interact with a tox server."""
-    cfg = ctx.ensure_object(dict)
-
-    cfg["host"] = host
-    cfg["port"] = port
-    cfg["bind_host"] = bind_host
-
-    cfg["control_uri"] = f"tcp://{host}:{port:d}"
-    logging.basicConfig(
-        format=f"[{ctx.invoked_subcommand}] %(message)s", level=logging.INFO
-    )
-
-
-def client(uri: str) -> zmq.Socket:
-    zctx = zmq.Context.instance()
-    socket = zctx.socket(zmq.REQ)
-    socket.connect(uri)
-    socket.set(zmq.LINGER, 10)
-    click.echo(f"Connected to {uri}")
-    return socket
-
-
-class LocalStreams:
-    def __getitem__(self, key: Stream) -> IO[bytes]:
-        if key == Stream.STDERR:
-            return getattr(sys.stderr, "buffer", sys.stderr)
-        elif key == Stream.STDOUT:
-            return getattr(sys.stdout, "buffer", sys.stdout)
-        else:
-            raise KeyError(key)
-
-    def __contains__(self, key: Stream) -> bool:
-        return key in Stream
-
-
-async def send_command(socket: zmq.asyncio.Socket, command: str, args: Any) -> None:
-    await socket.send_json({"command": command, "args": args})
-
-
 async def tox_command(
     args: List[str], output: zmq.asyncio.Socket, message: Message, tee: bool = True,
 ) -> subprocess.CompletedProcess:
-    """Cause a tox command to be run asynchronously"""
+    """Cause a tox command to be run asynchronously.
+
+    Also arranges to send OUTPUT messages over the provided socket.
+
+    Parameters
+    ----------
+    args: list
+        Arguments to tox
+    output: zmq.asyncio.Socket
+        Asynchronous ZMQ socket for sending output messages from the subprocess.
+    message: Message
+        Message used to set up replies on the output socket.
+    tee: bool
+        If set (default), also print output to local streams.
+
+    Returns
+    -------
+    process: subprocess.CompletedProcess
+        Named tuple summarizing the process.
+
+    """
     os.environ.setdefault("PY_COLORS", "1")
     arg_str = "tox " + " ".join(shlex.quote(a) for a in args)
     log.info(f"command: {arg_str}")
@@ -202,67 +217,69 @@ async def tox_command(
     proc = await asyncio.subprocess.create_subprocess_shell(
         arg_str, stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE
     )
+    log.debug(f"Launched proc {proc!r}")
 
     assert proc.stdout is not None, "Expected to get a STDOUT stream from asyncio"
     assert proc.stderr is not None, "Expected to get a STDERR stream from asyncio"
 
+    log.debug(f"Launching output tasks")
+
     output_tasks = {
-        asyncio.ensure_future(
-            publish_output(proc.stdout, output, message, Stream.STDOUT, tee=tee)
-        ),
-        asyncio.ensure_future(
-            publish_output(proc.stderr, output, message, Stream.STDERR, tee=tee)
-        ),
+        asyncio.create_task(publish_output(proc.stdout, output, message, Stream.STDOUT, tee=tee)),
+        asyncio.create_task(publish_output(proc.stderr, output, message, Stream.STDERR, tee=tee)),
     }
+
+    log.debug(f"Waiting for subprocess")
 
     try:
         returncode = await proc.wait()
     except asyncio.CancelledError:
+        log.debug(f"Cancelling subprocess")
         proc.terminate()
         returncode = await proc.wait()
-
+    except Exception:  # pragma: nocover
+        log.exception("Exception in proc.wait")
+        raise
     finally:
-
-        log.info(f"exit={returncode}")
+        log.debug(f"Cleaning up")
         for task in output_tasks:
             task.cancel()
 
         await asyncio.wait(output_tasks)
 
-        for task in output_tasks:
-            try:
-                task.result()
-            except asyncio.CancelledError:
-                log.info("Cancelled stream")
-            except Exception:
-                log.exception("Output Exception")
-
-    log.info(f"done")
+    log.info(f"command done")
 
     return subprocess.CompletedProcess(args, returncode=returncode)
 
 
 async def publish_output(
-    reader: asyncio.StreamReader,
-    socket: zmq.asyncio.Socket,
-    message: Message,
-    stream: Stream,
-    tee: bool = False,
+    reader: asyncio.StreamReader, socket: zmq.asyncio.Socket, message: Message, stream: Stream, tee: bool = False,
 ) -> None:
-    """Publish stream data to a ZMQ socket"""
-    streams = LocalStreams()
+    """Publish stream data to a ZMQ socket.
+
+    Parameters
+    ----------
+    reader: asyncio.StreamReader
+        Source reader for providing data
+    socket: zmq.asyncio.Socket
+        Socket for output messages
+    message: Message
+        Message template (provides identifiers)
+    stream: Stream
+        Enum identifying the stream in question (STDERR/STDOUT)
+    tee: bool
+        Whether to also send data to the local versions of the
+        requested streams.
+
+    """
 
     while True:
         data = await reader.read(n=1024)
         if data:
             message = message.respond(
-                Command.OUTPUT,
-                args={
-                    "data": base64.b85encode(data).decode("ascii"),
-                    "stream": stream.name,
-                },
+                Command.OUTPUT, args={"data": base64.b85encode(data).decode("ascii"), "stream": stream.name},
             )
-            await socket.send_multipart(message.assemble())
+            await message.send(socket)
         else:
             # No data was recieved, but we should yield back
             # to the event loop so we don't get stuck here.
@@ -270,120 +287,196 @@ async def publish_output(
             # but that doesn't seem to be possible with asyncio?
             await asyncio.sleep(0.1)
         if tee:
-            localstream = streams[stream]
-            localstream.write(data)
-            localstream.flush()
+            stream.fwrite(data)
 
 
 class Server:
-    def __init__(
-        self, control_uri: str, zctx: Optional[zmq.asyncio.Context] = None,
-    ) -> None:
-        self.control_uri = control_uri
+    """
+    Manages the asynchronous response to commands for the tox server.
+
+    To launch the server, call :meth:`serve_forever`.
+
+    Parameters
+    ----------
+    uri: str
+        ZMQ-style bind URI for the server. Will be bound to a ROUTER socket.
+    zctx: zmq.asyncio.Context, optional
+        ZMQ asynchronous context for creating sockets.
+
+    """
+
+    def __init__(self, uri: str, tee: bool = False, zctx: Optional[zmq.asyncio.Context] = None,) -> None:
+        self.uri = uri
+        self.tee = tee
         self.zctx = zctx or zmq.asyncio.Context()
 
-        self.tasks: Dict[Tuple[bytes, ...], asyncio.Future] = {}
+        self.tasks: Dict[Tuple[Command, Tuple[bytes, ...]], asyncio.Future] = {}
         self._timeout = 0.1
 
-    async def run_forever(self) -> None:
+    async def serve_forever(self) -> None:
+        """Start the server, and ensure it runs until this coroutine is cancelled
+
+        To cancel the server, start this method as a task, then cancel the task::
+
+            async def main():
+                server = Server("inproc://control")
+                task = asyncio.create_task(server.serve_forever)
+                task.cancel()
+                await task
+
+            asyncio.run(main)
+
+        """
+
+        # Event used to indicate that the server should finish gracefully.
         self.shutdown = asyncio.Event()
+
+        # The lock is used to ensure that only a single tox subprocess
+        # can run at any given time.
         self.lock = asyncio.Lock()
+
+        # Tracks pending coroutines
         self.tasks = {}
 
         self.socket = self.zctx.socket(zmq.ROUTER)
-        self.socket.bind(self.control_uri)
+        self.socket.bind(self.uri)
 
-        log.info(f"Running server at {self.control_uri}")
+        log.info(f"Running server at {self.uri}")
         log.info(f"^C to exit")
-        self._tevnt: asyncio.Future = asyncio.ensure_future(self.shutdown.wait())
         try:
-            await self.process()
+            task = asyncio.create_task(self.process())
+            await self.shutdown.wait()
+            await self.drain()
         except asyncio.CancelledError:
             log.info("Server cancelled")
-        except BaseException:
+        except BaseException:  # pragma: nocover
             log.exception("Server loop error")
             raise
         finally:
-            self._tevnt.cancel()
-            if self.tasks:
-                log.warn(f"{len(self.tasks)} tasks remaining")
+            task.cancel()
             self.socket.close()
         log.debug(f"Server is done.")
 
     async def send(self, message: Message) -> None:
+        """Send a message over the server's ZMQ socket
+
+        Parameters
+        ----------
+        message: Message
+            Message to be sent.
+
+        """
         log.debug(f"Send: {message!r}")
-        await self.socket.send_multipart(message.assemble())
+        await message.send(self.socket)
+
+    async def drain(self) -> None:
+        """Ensure any remianing tasks are awaited"""
+        if self.tasks:
+            await asyncio.wait(self.tasks.values())
 
     async def process(self) -> None:
+        """Process message events, dispatching handling to other futures.
 
+        Each message recieved starts a new task using :meth:`handle`. Tasks
+        are tracked using message identifiers, which are the identification
+        frames provided by ZMQ.
+
+        """
         while not self.shutdown.is_set():
-            trecv: asyncio.Future = asyncio.ensure_future(self.recv())
-            done, pending = await asyncio.wait(
-                (trecv, self._tevnt), return_when=asyncio.FIRST_COMPLETED,
-            )
-
-            trecv.cancel()
-            if trecv in done:
-                with contextlib.suppress(ProtocolError):
-                    msg = await trecv
-                    self.tasks[msg.identifier] = asyncio.ensure_future(self.handle(msg))
-
-        await asyncio.wait((self._tevnt, *self.tasks.values()))
+            with contextlib.suppress(ProtocolError):
+                msg = await self.recv()
+                if (msg.command, msg.identifier) in self.tasks:
+                    await self.send(
+                        msg.respond(
+                            Command.ERR, args={"message": "A task has already started.", "command": msg.command.name}
+                        )
+                    )
+                else:
+                    self.tasks[(msg.command, msg.identifier)] = asyncio.create_task(self.handle(msg))
 
     async def recv(self) -> Message:
-        data = await self.socket.recv_multipart()
+        """Recieve a message which conforms to the tox-server protocol
+
+        Messages which don't conform, raise errors. If socket identity information
+        is provided, error messages can be returned to the sender
+        (indicated by :exc:`ProtocolError`). Some messages don't contain enough information
+        to be certain of the sender, and so raise :exc:`ProtocolFailure` instead.
+
+        Returns
+        -------
+        message: Message
+            Incoming message object for transmission.
+
+        """
         try:
-            msg = Message.parse(data)
+            msg = await Message.recv(self.socket)
         except ProtocolError as e:
-            log.critical("Protocol error")
+            log.exception("Protocol error")
             await self.send(e.message)
             raise
-        except ProtocolFailure:
-            log.critical("Protocol failure")
-            raise
+        except ProtocolFailure:  # pragma: nocover
+            log.exception("Protocol failure")
 
-        log.debug(f"Message: {msg!r}")
+        log.debug(f"Recieve: {msg!r}")
         return msg
 
     async def handle(self, msg: Message) -> None:
+        """Handle a single tox-server protocol message, and respond.
 
+        This coroutine is designed to be run as its own task, and will
+        respond on the socket when appropriate. It delegates command
+        work to methods with names of the form ``handle_<command>`` where
+        ``<command>`` is the name of the command enum in lower case.
+        """
         try:
             await getattr(self, f"handle_{msg.command.name.lower()}")(msg)
+        except asyncio.CancelledError:  # pragma: nocover
+            raise
         except Exception as e:
             log.exception("Error in handler")
             err = msg.respond(command=Command.ERR, args={"message": str(e)})
             await self.send(err)
         finally:
-            value = self.tasks.pop(msg.identifier, None)
-            log.debug(f"Ended task: {value!r}")
+            self.tasks.pop((msg.command, msg.identifier), None)
+            log.debug(f"Finished handling {msg!r}")
 
     async def handle_cancel(self, msg: Message) -> None:
-        """Cancel a running tox"""
-        task = self.tasks.pop(msg.identifier, None)
+        """Handles a cancel message
+
+        If the client has sent a message and that message is processing,
+        it will be cancelled. Any task can be cancelled, but this is really
+        only useful for cancelling RUN tasks.
+        """
+        task = self.tasks.pop((Command.RUN, msg.identifier), None)
         if task:
+            log.debug(f"Cancelling {task!r}")
             task.cancel()
-            await self.send(await task)
         else:
-            await self.send(
-                msg.respond(Command.ERR, {"message": "Could not find task"},)
-            )
+            log.debug(f"Task to cancel not found: {msg!r}")
+            await self.send(msg.respond(Command.ERR, {"message": "Could not find task"},))
 
     async def handle_run(self, msg: Message) -> None:
+        """Handles a run message to start a tox subprocess.
+
+        Runs are controlled by :func:`tox_command`, and locked by the
+        server to ensure that only one tox process runs at a time.
+        """
         async with self.lock:
-            result = await tox_command(msg.args["tox"], self.socket, msg)
-        await self.send(
-            msg.respond(
-                Command.RUN, {"returncode": result.returncode, "args": result.args}
-            )
-        )
+            result = await tox_command(msg.args["tox"], self.socket, msg, tee=self.tee)
+        await self.send(msg.respond(Command.RUN, {"returncode": result.returncode, "args": result.args}))
 
     async def handle_quit(self, msg: Message) -> None:
+        """Handles a quit message to gracefully shut down.
+
+        Quit starts a graceful shutdown process for the server.
+        """
         self.shutdown.set()
         log.debug("Requesting shutdown")
         await self.send(msg.respond(Command.QUIT, "DONE"))
 
     async def handle_ping(self, msg: Message) -> None:
-        await self.send(msg.respond(Command.PONG, {"time": time.time()}))
+        """Handles a ping message to check the server liveliness"""
+        await self.send(msg.respond(Command.PING, {"time": time.time(), "tasks": len(self.tasks)}))
 
 
 def unparse_arguments(args: Tuple[str, ...]) -> Tuple[str, ...]:
@@ -405,63 +498,127 @@ def unparse_arguments(args: Tuple[str, ...]) -> Tuple[str, ...]:
     return args
 
 
-@main.command()
+@click.group()
+@click.option(
+    "-p", "--port", type=int, envvar="TOX_SERVER_PORT", help="Port to connect for tox-server.", required=True,
+)
+@click.option(
+    "-h", "--host", type=str, envvar="TOX_SERVER_HOST", default="localhost", help="Host to connect for tox-server.",
+)
+@click.option(
+    "-b",
+    "--bind-host",
+    type=str,
+    envvar="TOX_SERVER_BIND_HOST",
+    default="127.0.0.1",
+    help="Host to bind for tox-server serve.",
+)
 @click.option(
     "-t",
-    "--tee/--no-tee",
-    default=True,
-    help="Write output locally as well as transmitting.",
+    "--timeout",
+    type=float,
+    default=None,
+    help="Timeout for waiting on a response (s).",
+    envvar="TOX_SERVER_TIMEOUT",
+)
+@click.pass_context
+def main(ctx: click.Context, host: str, port: int, bind_host: str, timeout: Optional[float]) -> None:
+    """Interact with a tox server."""
+    cfg = ctx.ensure_object(dict)
+
+    cfg["uri"] = f"tcp://{host}:{port:d}"
+    cfg["bind"] = f"tcp://{bind_host}:{port:d}"
+    cfg["timeout"] = timeout
+    logging.basicConfig(format=f"[{ctx.invoked_subcommand}] %(message)s", level=logging.INFO)
+
+
+@main.command()
+@click.option(
+    "-t", "--tee/--no-tee", default=True, help="Write output locally as well as transmitting.",
 )
 @click.pass_context
 def serve(ctx: click.Context, tee: bool = True) -> None:
     """
-    Serve the tox server
+    Run the tox server.
+
+    The server runs indefinitely until it recieves a quit command or a sigint
     """
     cfg = ctx.find_object(dict)
-    control_uri = f"tcp://{cfg['bind_host']}:{cfg['port']:d}"
 
     try:
-        server = Server(control_uri)
-
-        asyncio.run(server.run_forever())
+        server = Server(cfg["bind"], tee=tee)
+        asyncio.run(server.serve_forever())
     except BaseException:
-        log.exception("Exception")
+        log.exception("Exception in server")
         raise
 
 
-async def run_command(
-    control_uri, tox_args: Tuple[str, ...], zctx: Optional[zmq.asyncio.Context] = None,
-):
+async def client(
+    uri: str, message: Message, timeout: Optional[float] = None, zctx: Optional[zmq.asyncio.Context] = None,
+) -> Message:
+    """Manage client connection to tox-server
+
+    This coroutine sends a command. It also sets up an interrput singal handler, so
+    that ^C is propogated to the server as a CANCEL command.
+
+    Parameters
+    ----------
+    uri: str
+        ZMQ-style connect URI to find the command server.
+    message: Message
+        Tox-server protocol message to send to the server
+    timeout: float, optional
+        Length of time to wait for any communication. Each message recieved will
+        reset this timeout.
+    zctx: zmq.asyncio.Context, optional
+        ZMQ context to use when building the socket connection.
+    """
     zctx = zctx or zmq.asyncio.Context.instance()
 
     client = zctx.socket(zmq.DEALER)
-    client.connect(control_uri)
+    client.connect(uri)
 
-    message = Message(command=Command.RUN, args={"tox": tox_args}, identifiers=[b""],)
+    with interrupt_handler(signal.SIGINT, functools.partial(send_interrupt, socket=client)), client:
 
-    with interrupt_handler(
-        signal.SIGINT, functools.partial(send_interrupt, client=client)
-    ), client:
+        await message.for_dealer().send(client)
 
-        await client.send_multipart(message.assemble())
-        msg = await process_run(client)
+        while True:
+            response = await asyncio.wait_for(Message.recv(client), timeout=timeout)
+            if response.command == Command.OUTPUT:
+                Stream[response.args["stream"]].fwrite(base64.b85decode(response.args["data"]))
+            else:
+                # Note: this assumes that OUTPUT is the only command which shouldn't end
+                # the await loop above, which might not be true...
+                break
 
-    return msg
+    return response
 
 
 @contextlib.contextmanager
-def interrupt_handler(sig: int, task_factory: Callable) -> Iterator[None]:
+def interrupt_handler(sig: int, task_factory: Callable[[], Awaitable[Any]]) -> Iterator[None]:
+    """Adds an async interrupt handler to the event loop for the context block.
+
+    The interrupt handler should be a callable task factory, which will create
+    a coroutine which should run when the signal is recieved. `task_factory` should
+    not accept any arguments.
+
+    Parameters
+    ----------
+    signal: int
+        Signal number (see :mod:`signal` for interrupt handler)
+    task_factory: callable
+        Factory function to create awaitable tasks which will be run when
+        the signal is recieved.
+
+    """
 
     if hasattr(asyncio, "get_running_loop"):
         loop = asyncio.get_running_loop()
-    else:
+    else:  # pragma: nocover
         loop = asyncio.get_event_loop()
 
     loop.add_signal_handler(
-        sig,
-        functools.partial(
-            signal_interrupt_handler, loop=loop, task_factory=task_factory
-        ),
+        sig, functools.partial(signal_interrupt_handler, loop=loop, task_factory=task_factory),
     )
 
     yield
@@ -469,32 +626,34 @@ def interrupt_handler(sig: int, task_factory: Callable) -> Iterator[None]:
     loop.remove_signal_handler(sig)
 
 
-async def send_interrupt(client: zmq.asyncio.Socket) -> None:
-    interrupt = Message(command=Command.CANCEL, args=None, identifiers=[b""])
-    log.critical(f"Sending interrupt: {interrupt!r}")
-    await client.send_multipart(interrupt.assemble())
+async def send_interrupt(socket: zmq.asyncio.Socket) -> None:
+    """Helper function to send a cancel message using the provided socket"""
+    interrupt = Message(command=Command.CANCEL, args=None, identifiers=(b"",))
+    log.info(f"Sending interrupt: {interrupt!r}")
+    await interrupt.send(socket)
 
 
-def signal_interrupt_handler(
-    loop: asyncio.AbstractEventLoop, task_factory: Callable,
-) -> None:
+def signal_interrupt_handler(loop: asyncio.AbstractEventLoop, task_factory: Callable,) -> None:
+    """
+    Callback used for :meth:`asyncio.AbstractEventLoop.add_signal_handler`
+    to schedule a coroutine when a signal is recieved.
+    """
     loop.create_task(task_factory())
 
 
-async def process_run(client: zmq.asyncio.Socket) -> Message:
-    streams = LocalStreams()
-    while True:
-        data = await client.recv_multipart()
-        msg = Message.parse(data)
-        if msg.command == Command.OUTPUT:
-            stream = streams[Stream[msg.args["stream"]]]
-            stream.write(base64.b85decode(msg.args["data"]))
-            stream.flush()
-        elif msg.command == Command.RUN:
-            break
-        elif msg.command == Command.ERR:
-            break
-    return msg
+def run_client(uri: str, message: Message, timeout: Optional[float] = None) -> Message:
+    """Wrapper function to run a client from a CLI"""
+    try:
+        response = asyncio.run(client(uri, message, timeout=timeout))
+    except BaseException:  # pragma: nocover
+        log.exception("Exception in asyncio loop")
+        raise
+
+    if response.command == Command.ERR:
+        log.error(f"Error in command: {response!r}")
+        click.echo(repr(message.args), err=True)
+        raise click.Abort()
+    return response
 
 
 @main.command(context_settings=dict(ignore_unknown_options=True))
@@ -509,127 +668,42 @@ def run(ctx: click.Context, tox_args: Tuple[str, ...]) -> None:
     tox_args = unparse_arguments(tox_args)
     cfg = ctx.find_object(dict)
 
-    message = asyncio.run(run_command(cfg["control_uri"], tox_args))
+    message = Message(command=Command.RUN, args={"tox": tox_args})
+    response = run_client(cfg["uri"], message, timeout=cfg["timeout"])
 
-    if message.command == Command.ERR:
-        click.echo(repr(message.args), err=True)
-        raise click.Abort()
-    elif message.command == Command.RUN:
-        response: subprocess.CompletedProcess = subprocess.CompletedProcess(
-            args=message.args["args"], returncode=message.args["returncode"]
-        )
-    if response.returncode == 0:
+    proc: subprocess.CompletedProcess = subprocess.CompletedProcess(
+        args=response.args["args"], returncode=response.args["returncode"]
+    )
+    if proc.returncode == 0:
         click.echo(f"[{click.style('DONE', fg='green')}] passed")
     else:
         click.echo(f"[{click.style('FAIL', fg='red')}] failed")
-    sys.exit(response.returncode)
+    sys.exit(proc.returncode)
 
 
 @main.command()
-@click.option(
-    "-t",
-    "--timeout",
-    type=int,
-    default=10,
-    help="Timeout for waiting on a response (ms).",
-)
 @click.pass_context
-def quit(ctx: click.Context, timeout: int) -> None:
+def quit(ctx: click.Context) -> None:
     """
     Quit the server.
     """
     cfg = ctx.find_object(dict)
 
     message = Message(command=Command.QUIT, args=None)
-    try:
-        response = asyncio.run(
-            single_command(cfg["control_uri"], message, timeout=timeout)
-        )
-    except BaseException:
-        log.exception("Exception")
-        raise
-    click.echo(response)
-
-
-async def single_command(
-    uri: str,
-    message: Message,
-    timeout: Optional[int] = None,
-    zctx: Optional[zmq.asyncio.Context] = None,
-) -> Any:
-    zctx = zctx or zmq.asyncio.Context()
-
-    socket = zctx.socket(zmq.REQ)
-    socket.connect(uri)
-    log.info(f"Connection to {uri}")
-
-    log.info(f"Sending message {message!r}")
-
-    task = asyncio.ensure_future(reqrep(socket, message.assemble()))
-    await asyncio.wait_for(task, timeout=timeout)
-    data = task.result()
-
-    message = Message.parse(data)
-    return message
-
-
-async def reqrep(socket: zmq.asyncio.Socket, data: List[bytes]) -> List[bytes]:
-    await socket.send_multipart(data)
-    log.info(f"Waiting for response from {data!r}")
-    return await socket.recv_multipart()
+    response = run_client(cfg["uri"], message, timeout=cfg["timeout"])
+    click.echo(response.args)
 
 
 @main.command()
-@click.option(
-    "-t",
-    "--timeout",
-    type=int,
-    default=10,
-    help="Timeout for waiting on a response (ms).",
-)
 @click.pass_context
-def ping(ctx: click.Context, timeout: int) -> None:
+def ping(ctx: click.Context) -> None:
     """
     Ping the server, to check if it is alive.
     """
     cfg = ctx.find_object(dict)
-
     message = Message(command=Command.PING, args=None)
-    try:
-        response = asyncio.run(
-            single_command(cfg["control_uri"], message, timeout=timeout)
-        )
-    except BaseException:
-        log.exception("Exception")
-        raise
-    click.echo(response)
-
-
-async def echoer(control_uri: str):
-    zctx = zmq.asyncio.Context()
-    socket = zctx.socket(zmq.REP)
-    socket.bind(control_uri)
-
-    while True:
-        message = await socket.recv_multipart()
-        log.info(f"Message: {message!r}")
-        await socket.send_multipart(message)
-
-
-@main.command()
-@click.pass_context
-def echo(ctx: click.Context) -> None:
-    """
-    Ping the server, to check if it is alive.
-    """
-    cfg = ctx.find_object(dict)
-    control_uri = f"tcp://{cfg['bind_host']}:{cfg['port']:d}"
-
-    try:
-        asyncio.run(echoer(control_uri))
-    except BaseException:
-        log.exception("Exception")
-        raise
+    response = run_client(cfg["uri"], message, timeout=cfg["timeout"])
+    click.echo(response.args)
 
 
 if __name__ == "__main__":

@@ -654,7 +654,7 @@ async def send_interrupt(socket: zmq.asyncio.Socket) -> None:
     interrupt = Message(command=Command.CANCEL, args=None, identifiers=(b"",))
     log.info(f"Sending interrupt: {interrupt!r}")
     click.echo("", err=True)
-    click.echo("Cancelling this command with the server. ^C again to exit anyway.", err=True)
+    click.echo(f"Cancelling {command_name()} with the server. ^C again to exit.", err=True)
     await interrupt.send(socket)
 
 
@@ -671,18 +671,21 @@ def signal_interrupt_handler(
     loop.create_task(task_factory())
 
 
+def command_name() -> str:
+    return click.get_current_context().command.name
+
+
 def run_client(uri: str, message: Message, timeout: Optional[float] = None) -> Message:
     """Wrapper function to run a client from a CLI"""
     try:
         response = asyncio.run(client(uri, message, timeout=timeout), debug=True)
     except asyncio.TimeoutError:
-        click.echo("", err=True)
-        click.echo("Operation timed out!", err=True)
-        raise click.Abort()
+        click.echo(f"Command {command_name()} timed out!", err=True)
+        raise SystemExit(2)
     except KeyboardInterrupt:
         click.echo("", err=True)
-        click.echo("Operation interrupted!", err=True)
-        raise click.Abort()
+        click.echo(f"Command {command_name()} interrupted!", err=True)
+        raise SystemExit(3)
     except BaseException:  # pragma: nocover
         log.exception("Unhandled exception in asyncio loop")
         raise
@@ -690,7 +693,8 @@ def run_client(uri: str, message: Message, timeout: Optional[float] = None) -> M
         if response.command == Command.ERR:
             log.error(f"Error in command: {response!r}")
             click.echo(repr(message.args), err=True)
-            raise click.Abort()
+            click.echo(f"Command {command_name()} error!", err=True)
+            raise SystemExit(1)
         return response
 
 

@@ -508,7 +508,7 @@ async def test_cli_interrupt(unused_tcp_port: int, zctx: zmq.asyncio.Context) ->
     server.setsockopt(zmq.LINGER, 0)
     server.bind(f"tcp://127.0.0.1:{unused_tcp_port:d}")
 
-    with server, click_in_process(args, exit_code=1) as proc:
+    with server, click_in_process(args, exit_code=3) as proc:
         assert proc.pid is not None
 
         # We get the quit message, but we won't
@@ -539,7 +539,7 @@ async def test_cli_timeout(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> N
     server.setsockopt(zmq.LINGER, 0)
     server.bind(f"tcp://127.0.0.1:{unused_tcp_port:d}")
 
-    with server, click_in_process(args, exit_code=1) as proc:
+    with server, click_in_process(args, exit_code=2) as proc:
         assert proc.pid is not None
 
         # We get the quit message, but we won't

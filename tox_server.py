@@ -653,6 +653,8 @@ async def send_interrupt(socket: zmq.asyncio.Socket) -> None:
     """Helper function to send a cancel message using the provided socket"""
     interrupt = Message(command=Command.CANCEL, args=None, identifiers=(b"",))
     log.info(f"Sending interrupt: {interrupt!r}")
+    click.echo("", err=True)
+    click.echo("Cancelling this command with the server. ^C again to exit anyway.", err=True)
     await interrupt.send(socket)
 
 
@@ -674,9 +676,11 @@ def run_client(uri: str, message: Message, timeout: Optional[float] = None) -> M
     try:
         response = asyncio.run(client(uri, message, timeout=timeout), debug=True)
     except asyncio.TimeoutError:
+        click.echo("", err=True)
         click.echo("Operation timed out!", err=True)
         raise click.Abort()
     except KeyboardInterrupt:
+        click.echo("", err=True)
         click.echo("Operation interrupted!", err=True)
         raise click.Abort()
     except BaseException:  # pragma: nocover

@@ -4,6 +4,8 @@ import dataclasses as dc
 import functools
 import json
 import multiprocessing as mp
+import os
+import signal
 import sys
 import unittest.mock as mock
 from typing import Any
@@ -400,19 +402,23 @@ async def test_server_quit_and_drain(
 
 
 @contextlib.contextmanager
-def server_in_process(port: int) -> Iterator[mp.Process]:
+def click_in_process(args: List[str], exit_code: int = 0, timeout: float = 0.1) -> Iterator[mp.Process]:
     (recv, send) = mp.Pipe()
-    proc = mp.Process(target=_server_process_target, args=(port, send), name="test-tox-server")
+    started = mp.Event()
+    proc = mp.Process(target=_click_process_target, args=(args, send, started), name="cli-process")
     proc.start()
     try:
+        started.wait(timeout)
+
         yield proc
 
-        if recv.poll(1):
+        if recv.poll(timeout):
             result = recv.recv()
-            assert result.exit_code == 0
+            assert result.exit_code == exit_code
         else:
-            raise ValueError("No result recieved from server")
+            raise ValueError("No result recieved from command {args!r}")
 
+        proc.join(timeout)
     finally:
         proc.terminate()
 
@@ -423,10 +429,25 @@ class ProcessResult:
     output: str
 
 
-def _server_process_target(port: int, chan: Any) -> None:
-    runner = click.testing.CliRunner()
-    result = runner.invoke(ts.main, args=[f"-p{port:d}", "-b127.0.0.1", "serve"], catch_exceptions=False)
-    chan.send(ProcessResult(result.exit_code, result.output))
+def _click_process_target(args: List[str], chan: Any, event: Any) -> None:
+    try:
+        runner = click.testing.CliRunner()
+        event.set()
+        sys.argv = [sys.argv[0]] + args
+        result = runner.invoke(ts.main, args=args)
+        chan.send(ProcessResult(result.exit_code, result.output))
+    except BaseException as e:
+        print(e)
+        raise
+    finally:
+        chan.send(ProcessResult(-1, "Process kinda failed"))
+
+
+@contextlib.contextmanager
+def server_in_process(port: int) -> Iterator[mp.Process]:
+    args = [f"-p{port:d}", "-b127.0.0.1", "serve"]
+    with click_in_process(args) as proc:
+        yield proc
 
 
 def test_cli_quit(unused_tcp_port: int) -> None:
@@ -477,6 +498,111 @@ def test_cli_run_unknown_argument(unused_tcp_port: int) -> None:
         runner = click.testing.CliRunner()
         result = runner.invoke(ts.main, args=[f"-p{unused_tcp_port:d}", "-hlocalhost", "quit"])
         assert result.exit_code == 0
+
+
+@mark_asyncio_timeout(2)
+async def test_cli_interrupt(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> None:
+    args = [f"-p{unused_tcp_port:d}", "-hlocalhost", "-ldebug", "quit"]
+
+    server = zctx.socket(zmq.ROUTER)
+    server.setsockopt(zmq.LINGER, 0)
+    server.bind(f"tcp://127.0.0.1:{unused_tcp_port:d}")
+
+    with server, click_in_process(args, exit_code=1) as proc:
+        assert proc.pid is not None
+
+        # We get the quit message, but we won't
+        # respond. This just indicates that the CLI is running.
+        msg = await ts.Message.recv(server)
+        ts.log.debug(repr(msg))
+
+        # First signal sends CANCEL
+        os.kill(proc.pid, signal.SIGINT)
+        # We get the cancel message, but we won't
+        # respond. This again indicates that the CLI is running.
+        msg = await ts.Message.recv(server)
+        ts.log.debug(repr(msg))
+
+        assert proc.is_alive()
+
+        # Second signal interrupts process
+        os.kill(proc.pid, signal.SIGINT)
+        proc.join(0.1)
+        assert not proc.is_alive()
+
+
+@mark_asyncio_timeout(1)
+async def test_cli_timeout(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> None:
+    args = [f"-p{unused_tcp_port:d}", "-hlocalhost", "-ldebug", "-t0.1", "quit"]
+
+    server = zctx.socket(zmq.ROUTER)
+    server.setsockopt(zmq.LINGER, 0)
+    server.bind(f"tcp://127.0.0.1:{unused_tcp_port:d}")
+
+    with server, click_in_process(args, exit_code=1) as proc:
+        assert proc.pid is not None
+
+        # We get the quit message, but we won't
+        # respond. This just indicates that the CLI is running.
+        msg = await ts.Message.recv(server)
+        ts.log.debug(repr(msg))
+
+        # Wait the duration of the timeout, but which may have already
+        # happened in the subporcess
+
+        await asyncio.sleep(0.1)
+        proc.join(0.1)
+        assert not proc.is_alive()
+
+
+@mark_asyncio_timeout(1)
+async def test_cli_error(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> None:
+    args = [f"-p{unused_tcp_port:d}", "-hlocalhost", "-ldebug", "quit"]
+
+    server = zctx.socket(zmq.ROUTER)
+    server.setsockopt(zmq.LINGER, 0)
+    server.bind(f"tcp://127.0.0.1:{unused_tcp_port:d}")
+
+    with server, click_in_process(args, exit_code=1) as proc:
+        assert proc.pid is not None
+
+        # We get the quit message, but we won't
+        # respond. This just indicates that the CLI is running.
+        msg = await ts.Message.recv(server)
+        ts.log.debug(repr(msg))
+
+        response = msg.respond(command=ts.Command.ERR, args={"message": "An error occured"})
+        await response.send(server)
+
+        await asyncio.sleep(0.1)
+        proc.join(0.1)
+        assert not proc.is_alive()
+
+
+@mark_asyncio_timeout(1)
+async def test_cli_argparse(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> None:
+    args = [f"-p{unused_tcp_port:d}", "-hlocalhost", "-ldebug", "run", "--foo", "--", "--arg-here"]
+
+    server = zctx.socket(zmq.ROUTER)
+    server.setsockopt(zmq.LINGER, 0)
+    server.bind(f"tcp://127.0.0.1:{unused_tcp_port:d}")
+
+    with server, click_in_process(args, exit_code=0) as proc:
+        assert proc.pid is not None
+
+        # We get the quit message, but we won't
+        # respond. This just indicates that the CLI is running.
+        msg = await ts.Message.recv(server)
+        ts.log.debug(repr(msg))
+
+        assert msg.args["tox"] == ["--foo", "--", "--arg-here"]
+
+        response = msg.respond(command=ts.Command.RUN, args={"returncode": 0, "args": msg.args["tox"]})
+        await response.send(server)
+
+        await asyncio.sleep(0.1)
+        proc.join(0.1)
+        assert not proc.is_alive()
 
 
 class TestMessage:

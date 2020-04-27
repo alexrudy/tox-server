@@ -488,6 +488,9 @@ def unparse_arguments(args: Tuple[str, ...]) -> Tuple[str, ...]:
     option on to tox on the remote server. This function re-adds the empty option
     if it was present on the command line.
     """
+    if not all(arg in sys.argv for arg in args):
+        return args
+
     try:
         idx = sys.argv.index("--") - (len(sys.argv) - len(args) - 1)
     except ValueError:
@@ -497,6 +500,25 @@ def unparse_arguments(args: Tuple[str, ...]) -> Tuple[str, ...]:
         ta.insert(idx, "--")
         args = tuple(ta)
     return args
+
+
+class LogLevelParamType(click.ParamType):
+    name = "log_level"
+
+    def convert(self, value: str, param: Any, ctx: Any) -> int:
+        try:
+            return int(value)
+        except TypeError:
+            self.fail(
+                "expected string for int() conversion, got " f"{value!r} of type {type(value).__name__}", param, ctx
+            )
+        except ValueError:
+            try:
+                return getattr(logging, value.upper())
+            except AttributeError:
+                pass
+
+            self.fail(f"{value!r} is not a valid integer", param, ctx)
 
 
 @click.group()
@@ -520,15 +542,16 @@ def unparse_arguments(args: Tuple[str, ...]) -> Tuple[str, ...]:
     help="Timeout for waiting on a response (s).",
     envvar="TOX_SERVER_TIMEOUT",
 )
+@click.option("-l", "--log-level", type=LogLevelParamType(), help="Set logging level", default=logging.WARNING)
 @click.pass_context
-def main(ctx: click.Context, host: str, port: int, bind_host: str, timeout: Optional[float]) -> None:
+def main(ctx: click.Context, host: str, port: int, bind_host: str, timeout: Optional[float], log_level: int) -> None:
     """Interact with a tox server."""
     cfg = ctx.ensure_object(dict)
 
     cfg["uri"] = f"tcp://{host}:{port:d}"
     cfg["bind"] = f"tcp://{bind_host}:{port:d}"
     cfg["timeout"] = timeout
-    logging.basicConfig(format=f"[{ctx.invoked_subcommand}] %(message)s", level=logging.INFO)
+    logging.basicConfig(format=f"[{ctx.invoked_subcommand}] %(message)s", level=log_level)
 
 
 @main.command()
@@ -574,8 +597,9 @@ async def client(
 
     client = zctx.socket(zmq.DEALER)
     client.connect(uri)
+    client.setsockopt(zmq.LINGER, 0)
 
-    with interrupt_handler(signal.SIGINT, functools.partial(send_interrupt, socket=client)), client:
+    with interrupt_handler(signal.SIGINT, functools.partial(send_interrupt, socket=client), oneshot=True), client:
 
         await message.for_dealer().send(client)
 
@@ -592,7 +616,7 @@ async def client(
 
 
 @contextlib.contextmanager
-def interrupt_handler(sig: int, task_factory: Callable[[], Awaitable[Any]]) -> Iterator[None]:
+def interrupt_handler(sig: int, task_factory: Callable[[], Awaitable[Any]], oneshot: bool = False) -> Iterator[None]:
     """Adds an async interrupt handler to the event loop for the context block.
 
     The interrupt handler should be a callable task factory, which will create
@@ -610,7 +634,15 @@ def interrupt_handler(sig: int, task_factory: Callable[[], Awaitable[Any]]) -> I
     """
     loop = asyncio.get_running_loop()
 
-    loop.add_signal_handler(sig, functools.partial(signal_interrupt_handler, loop=loop, task_factory=task_factory))
+    sig_oneshot: Optional[int]
+    if oneshot:
+        sig_oneshot = sig
+    else:
+        sig_oneshot = None
+
+    loop.add_signal_handler(
+        sig, functools.partial(signal_interrupt_handler, loop=loop, task_factory=task_factory, sig=sig_oneshot)
+    )
 
     yield
 
@@ -624,39 +656,49 @@ async def send_interrupt(socket: zmq.asyncio.Socket) -> None:
     await interrupt.send(socket)
 
 
-def signal_interrupt_handler(loop: asyncio.AbstractEventLoop, task_factory: Callable) -> None:
+def signal_interrupt_handler(
+    loop: asyncio.AbstractEventLoop, task_factory: Callable, sig: Optional[int] = None
+) -> None:
     """
     Callback used for :meth:`asyncio.AbstractEventLoop.add_signal_handler`
     to schedule a coroutine when a signal is recieved.
     """
+    if sig is not None:
+        loop.remove_signal_handler(sig)
+
     loop.create_task(task_factory())
 
 
 def run_client(uri: str, message: Message, timeout: Optional[float] = None) -> Message:
     """Wrapper function to run a client from a CLI"""
     try:
-        response = asyncio.run(client(uri, message, timeout=timeout))
-    except BaseException:  # pragma: nocover
-        log.exception("Exception in asyncio loop")
-        raise
-
-    if response.command == Command.ERR:
-        log.error(f"Error in command: {response!r}")
-        click.echo(repr(message.args), err=True)
+        response = asyncio.run(client(uri, message, timeout=timeout), debug=True)
+    except asyncio.TimeoutError:
+        click.echo("Operation timed out!", err=True)
         raise click.Abort()
-    return response
+    except KeyboardInterrupt:
+        click.echo("Operation interrupted!", err=True)
+        raise click.Abort()
+    except BaseException:  # pragma: nocover
+        log.exception("Unhandled exception in asyncio loop")
+        raise
+    else:
+        if response.command == Command.ERR:
+            log.error(f"Error in command: {response!r}")
+            click.echo(repr(message.args), err=True)
+            raise click.Abort()
+        return response
 
 
-@main.command(context_settings=dict(ignore_unknown_options=True))
+@main.command(context_settings=dict(ignore_unknown_options=True, allow_extra_args=True))
 @click.pass_context
-@click.argument("tox_args", nargs=-1, type=click.UNPROCESSED)
-def run(ctx: click.Context, tox_args: Tuple[str, ...]) -> None:
+def run(ctx: click.Context) -> None:
     """
     Run a tox command on the server.
 
     All arguments are forwarded to `tox` on the host machine.
     """
-    tox_args = unparse_arguments(tox_args)
+    tox_args = unparse_arguments(tuple(ctx.args))
     cfg = ctx.find_object(dict)
 
     message = Message(command=Command.RUN, args={"tox": tox_args})

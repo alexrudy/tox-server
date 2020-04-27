@@ -5,8 +5,6 @@ and calls it with commands from a remote CLI. It responds to commands
 via [ZeroMQ](https://zeromq.org). It isn't super useful on its own (as it doesn't eliminate the startup time for tox, just runs it repeatedly) but it is
 helpful if your tests have to be run inside another environment with some setup cost, such as a docker container.
 
-To illustrate this, a minimal docker file is included.
-
 ## Installation
 
 You can use `pip` to install `tox-server`:
@@ -27,7 +25,7 @@ $ tox-server serve
 
 The server binds to `127.0.0.1` (i.e. it will only accept connections from localhost) because it is
 not secured. If you are running it on an isolated network (like via docker), you can bind it to another host
-with `tox-server server -b 0.0.0.0`.
+with `tox-server  -b 0.0.0.0 serve`.
 
 ## Run a tox command remotely
 
@@ -38,3 +36,9 @@ $ tox-server run -e py37
 ```
 
 This will run `tox -e py37` on the remote host.
+
+## A note on security
+
+Basically, security is hard. This program doesn't provide any authentication mechanism, and I'm not tempted
+to add one. Before you expose ports from `tox-server` to the world wide web, I'd advise using something like
+SSH tunneling to provide security and authentication.

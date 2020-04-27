@@ -1,0 +1,4 @@
+pytest
+pytest-cov
+pytest-asyncio
+mock;python_version < "3.8"

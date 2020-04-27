@@ -1,0 +1,4 @@
+[run]
+concurrency = multiprocessing
+source = tox_server.py
+parallel = True

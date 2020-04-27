@@ -611,11 +611,7 @@ def interrupt_handler(sig: int, task_factory: Callable[[], Awaitable[Any]]) -> I
         the signal is recieved.
 
     """
-
-    if hasattr(asyncio, "get_running_loop"):
-        loop = asyncio.get_running_loop()
-    else:  # pragma: nocover
-        loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
 
     loop.add_signal_handler(
         sig, functools.partial(signal_interrupt_handler, loop=loop, task_factory=task_factory),

@@ -1,5 +1,7 @@
 # Tox Server
 
+![Tests](https://github.com/alexrudy/tox-server/workflows/Tox%20Server%20Tests/badge.svg)
+
 `tox-server` is a command line tool which runs [tox](https://tox.readthedocs.io/en/latest/) in a loop
 and calls it with commands from a remote CLI. It responds to commands
 via [ZeroMQ](https://zeromq.org). It isn't super useful on its own (as it doesn't eliminate the startup time for tox, just runs it repeatedly) but it is

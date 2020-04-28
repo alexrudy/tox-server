@@ -69,6 +69,9 @@ class Command(enum.Enum):
     OUTPUT = enum.auto()
     #: Indicates tox output
 
+    INTERRUPT = enum.auto()
+    #: Interrupt the running command
+
     CANCEL = enum.auto()
     #: Cancel a running tox command
 
@@ -141,8 +144,8 @@ class Message:
         """Create a response message object, which retains message identifiers"""
         return dc.replace(self, command=command, args=args)
 
-    def cancel(self) -> "Message":
-        return dc.replace(self, command=Command.CANCEL, args={"command": self.command.name})
+    def interrupt(self) -> "Message":
+        return dc.replace(self, command=Command.INTERRUPT, args={"command": self.command.name})
 
     @property
     def identifier(self) -> Tuple[bytes, ...]:
@@ -430,8 +433,10 @@ class Server:
         """
         try:
             await getattr(self, f"handle_{msg.command.name.lower()}")(msg)
-        except asyncio.CancelledError:  # pragma: nocover
-            raise
+        except asyncio.CancelledError:
+            log.debug(f"Notifying client of cancellation {msg!r}")
+            err = msg.respond(command=Command.ERR, args={"message": f"Command {msg.command.name} was cancelled."})
+            await self.send(err)
         except Exception as e:
             log.exception("Error in handler")
             err = msg.respond(command=Command.ERR, args={"message": str(e)})
@@ -440,21 +445,44 @@ class Server:
             self.tasks.pop((msg.command, msg.identifier), None)
             log.debug(f"Finished handling {msg!r}")
 
-    async def handle_cancel(self, msg: Message) -> None:
-        """Handles a cancel message
+    async def handle_interrupt(self, msg: Message) -> None:
+        """Handles an interrupt message
 
         If the client has sent a message and that message is processing,
         it will be cancelled. Any task can be cancelled, but this is really
         only useful for cancelling RUN tasks.
         """
-        target = Command[msg.args["command"]]
-        task = self.tasks.pop((target, msg.identifier), None)
+        try:
+            target = Command[msg.args["command"]]
+        except KeyError:
+            raise ValueError(f"Unknown command {msg.args['command']}")
+
+        task = self.tasks.get((target, msg.identifier), None)
         if task:
-            log.debug(f"Cancelling {task!r}")
+            log.debug(f"Interrupting {task!r}")
             task.cancel()
         else:
-            log.debug(f"Task to cancel not found: {msg!r}")
+            log.debug(f"Task to interrupt not found: {msg!r}")
             await self.send(msg.respond(Command.ERR, {"message": "Could not find task"}))
+
+    async def handle_cancel(self, msg: Message) -> None:
+        """Handles a cancel message to cancel all commands of a specific type
+
+        If the client has any commands of this type, they will be cancelled
+        """
+        try:
+            target = Command[msg.args["command"]]
+        except KeyError:
+            raise ValueError(f"Unknown command {msg.args['command']}")
+
+        # Do this once so we only cancel tasks in progress when this command was sent.
+        tasks = [task for (command, _), task in self.tasks.items() if command == target]
+
+        for task in tasks:
+            log.debug(f"Cancelling {task!r}")
+            task.cancel()
+
+        await self.send(msg.respond(Command.CANCEL, args={"cancelled": len(tasks)}))
 
     async def handle_run(self, msg: Message) -> None:
         """Handles a run message to start a tox subprocess.
@@ -542,7 +570,14 @@ class LogLevelParamType(click.ParamType):
     help="Timeout for waiting on a response (s).",
     envvar="TOX_SERVER_TIMEOUT",
 )
-@click.option("-l", "--log-level", type=LogLevelParamType(), help="Set logging level", default=logging.WARNING)
+@click.option(
+    "-l",
+    "--log-level",
+    envvar="TOX_SERVER_LOG_LEVEL",
+    type=LogLevelParamType(),
+    help="Set logging level",
+    default=logging.WARNING,
+)
 @click.pass_context
 def main(ctx: click.Context, host: str, port: int, bind_host: str, timeout: Optional[float], log_level: int) -> None:
     """Interact with a tox server."""
@@ -652,8 +687,8 @@ def interrupt_handler(sig: int, task_factory: Callable[[], Awaitable[Any]], ones
 
 
 async def send_interrupt(socket: zmq.asyncio.Socket, message: Message) -> None:
-    """Helper function to send a cancel message using the provided socket"""
-    interrupt = message.cancel().for_dealer()
+    """Helper function to send an interrupt message using the provided socket"""
+    interrupt = message.interrupt().for_dealer()
     log.debug(f"Sending interrupt: {interrupt!r}")
     click.echo("", err=True)
     click.echo(f"Cancelling {command_name()} with the server. ^C again to exit.", err=True)
@@ -694,7 +729,7 @@ def run_client(uri: str, message: Message, timeout: Optional[float] = None) -> M
     else:
         if response.command == Command.ERR:
             log.error(f"Error in command: {response!r}")
-            click.echo(repr(message.args), err=True)
+            click.echo(response.args.get("message", repr(response.args)), err=True)
             click.echo(f"Command {command_name()} error!", err=True)
             raise SystemExit(1)
         return response
@@ -733,6 +768,20 @@ def quit(ctx: click.Context) -> None:
     cfg = ctx.find_object(dict)
 
     message = Message(command=Command.QUIT, args=None)
+    response = run_client(cfg["uri"], message, timeout=cfg["timeout"])
+    click.echo(response.args)
+
+
+@main.command()
+@click.option("--command", "-c", type=str, help="Command to cancel, default is 'run'.", default="RUN")
+@click.pass_context
+def cancel(ctx: click.Context, command: str) -> None:
+    """
+    Cancel all commands of a particular flavor on the server.
+    """
+    cfg = ctx.find_object(dict)
+
+    message = Message(command=Command.CANCEL, args={"command": command.upper()})
     response = run_client(cfg["uri"], message, timeout=cfg["timeout"])
     click.echo(response.args)
 

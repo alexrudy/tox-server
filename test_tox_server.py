@@ -148,19 +148,33 @@ def uri(protocol: str, unused_tcp_port: int) -> URI:
 
 
 @dc.dataclass
-class SubprocessManager:
+class SubprocessState:
+    hang: bool
     returncode: asyncio.Future
+
+
+@dc.dataclass
+class SubprocessManager:
     proc: mock.Mock
     create_subprocess_shell: mock.Mock
+    state: SubprocessState
+
+    @property
+    def returncode(self) -> asyncio.Future:
+        return self.state.returncode
 
 
 @pytest.fixture
 async def process(monkeypatch: Any, event_loop: Any) -> SubprocessManager:
 
-    returncode: asyncio.Future[int] = event_loop.create_future()
+    returncode: asyncio.Future = event_loop.create_future()
+    state = SubprocessState(hang=False, returncode=returncode)
 
     async def proc_wait() -> int:
         log.debug("Waiting for returncode")
+        if state.hang:
+            while True:
+                await asyncio.sleep(0.01)
         rc = await asyncio.wait_for(asyncio.shield(returncode), timeout=1)
         log.debug(f"Got returncode: {rc}")
         return rc
@@ -176,7 +190,7 @@ async def process(monkeypatch: Any, event_loop: Any) -> SubprocessManager:
     proc.wait.side_effect = proc_wait
     proc.terminate.side_effect = proc_terminate
     monkeypatch.setattr(asyncio.subprocess, "create_subprocess_shell", css)
-    return SubprocessManager(returncode, proc, css)
+    return SubprocessManager(proc, css, state)
 
 
 @contextlib.asynccontextmanager
@@ -290,7 +304,7 @@ async def test_client_interrupt(
         msg = ts.Message(command=ts.Command.RUN, args={"tox": []})
         await msg.for_dealer().send(socket)
 
-        await msg.cancel().for_dealer().send(socket)
+        await msg.interrupt().for_dealer().send(socket)
 
         process.returncode.set_result(5)
 
@@ -298,6 +312,108 @@ async def test_client_interrupt(
 
     assert response.command == ts.Command.RUN
     assert response.args["returncode"] == 5
+
+
+@mark_asyncio_timeout(1)
+async def test_client_cancel_hang(
+    server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
+) -> None:
+
+    process.state.hang = True
+    with zctx.socket(zmq.DEALER) as socket:
+        socket.connect(uri.connect)
+        msg = ts.Message(command=ts.Command.RUN, args={"tox": []})
+        await msg.for_dealer().send(socket)
+
+        cancel = ts.Message(command=ts.Command.CANCEL, args={"command": "RUN"})
+        await cancel.for_dealer().send(socket)
+
+        # First let me know the cancel happend
+        response = await ts.Message.recv(socket)
+        assert response.command == ts.Command.CANCEL
+
+        cancel = ts.Message(command=ts.Command.CANCEL, args={"command": "RUN"})
+        await cancel.for_dealer().send(socket)
+
+        # Then let me know the second cancel happend
+        response = await ts.Message.recv(socket)
+        assert response.command == ts.Command.CANCEL
+
+        # Then let me see the error
+        response = await ts.Message.recv(socket)
+
+        assert response.command == ts.Command.ERR
+        assert response.args["message"] == "Command RUN was cancelled."
+
+
+@mark_asyncio_timeout(1)
+async def test_client_interrupt_hang(
+    server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
+) -> None:
+
+    process.state.hang = True
+    with zctx.socket(zmq.DEALER) as socket:
+        socket.connect(uri.connect)
+        msg = ts.Message(command=ts.Command.RUN, args={"tox": []})
+        await msg.for_dealer().send(socket)
+
+        await msg.interrupt().for_dealer().send(socket)
+
+        await asyncio.sleep(0.1)
+
+        await msg.interrupt().for_dealer().send(socket)
+
+        # Let me see the error
+        response = await ts.Message.recv(socket)
+
+        assert response.command == ts.Command.ERR
+        assert response.args["message"] == "Command RUN was cancelled."
+
+
+@mark_asyncio_timeout(1)
+async def test_client_cancel_wrong_command(
+    server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
+) -> None:
+
+    process.state.hang = True
+    with zctx.socket(zmq.DEALER) as socket:
+        socket.connect(uri.connect)
+
+        command = "FOO"
+        with pytest.raises(KeyError):
+            ts.Command[command]
+
+        cancel = ts.Message(command=ts.Command.CANCEL, args={"command": command})
+
+        await cancel.for_dealer().send(socket)
+
+        # Show me the error
+        response = await ts.Message.recv(socket)
+        assert response.command == ts.Command.ERR
+        assert response.args["message"] == "Unknown command FOO"
+
+
+@mark_asyncio_timeout(1)
+async def test_client_interrupt_wrong_command(
+    server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
+) -> None:
+
+    process.state.hang = True
+    with zctx.socket(zmq.DEALER) as socket:
+        socket.connect(uri.connect)
+
+        command = "FOO"
+        with pytest.raises(KeyError):
+            ts.Command[command]
+
+        cancel = ts.Message(command=ts.Command.INTERRUPT, args={"command": command})
+
+        await cancel.for_dealer().send(socket)
+
+        # Show me the error
+        response = await ts.Message.recv(socket)
+        assert response.command == ts.Command.ERR
+        assert response.args["message"] == "Unknown command FOO"
 
 
 @mark_asyncio_timeout(1)
@@ -316,7 +432,7 @@ async def test_client_interrupt_finished_task(
         assert response.command == ts.Command.RUN
         assert response.args["returncode"] == 5
 
-        await msg.cancel().for_dealer().send(socket)
+        await msg.interrupt().for_dealer().send(socket)
 
         response = await ts.Message.recv(socket)
         assert response.command == ts.Command.ERR
@@ -324,7 +440,7 @@ async def test_client_interrupt_finished_task(
 
 
 @mark_asyncio_timeout(1)
-async def test_client_interrupt_unknown_task(
+async def test_client_repeat_task(
     server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
 ) -> None:
 
@@ -352,16 +468,16 @@ async def test_client_interrupt_unknown_task(
 
 
 @mark_asyncio_timeout(1)
-async def test_client_repeat_task(
+async def test_client_interrupt_unknown_task(
     server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
 ) -> None:
 
     with zctx.socket(zmq.DEALER) as socket:
         socket.connect(uri.connect)
 
-        cancel_msg = ts.Message(command=ts.Command.CANCEL, args={"command": "RUN"})
-        log.debug(f"CSend: {cancel_msg}")
-        await cancel_msg.for_dealer().send(socket)
+        interrupt_msg = ts.Message(command=ts.Command.INTERRUPT, args={"command": "RUN"})
+        log.debug(f"CSend: {interrupt_msg}")
+        await interrupt_msg.for_dealer().send(socket)
 
         response = await ts.Message.recv(socket)
         assert response.command == ts.Command.ERR
@@ -408,6 +524,52 @@ async def test_server_quit_and_drain(
 
         assert responses[ts.Command.RUN].args["returncode"] == 2
         assert ts.Command.QUIT in responses
+
+
+@mark_asyncio_timeout(1)
+async def test_server_quit_and_drain_multisource(
+    server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
+) -> None:
+
+    with zctx.socket(zmq.DEALER) as socket_a, zctx.socket(zmq.DEALER) as socket_b:
+        socket_a.connect(uri.connect)
+        socket_b.connect(uri.connect)
+
+        msg = ts.Message(command=ts.Command.RUN, args={"tox": []})
+        await msg.for_dealer().send(socket_a)
+
+        msg = ts.Message(command=ts.Command.QUIT, args=None)
+        await msg.for_dealer().send(socket_b)
+        process.returncode.set_result(2)
+
+        response = await ts.Message.recv(socket_b)
+        assert response.command == ts.Command.QUIT
+
+        response = await ts.Message.recv(socket_a)
+        assert response.args["returncode"] == 2
+
+
+@mark_asyncio_timeout(1)
+async def test_server_cancel_multisource(
+    server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
+) -> None:
+
+    with zctx.socket(zmq.DEALER) as socket_a, zctx.socket(zmq.DEALER) as socket_b:
+        socket_a.connect(uri.connect)
+        socket_b.connect(uri.connect)
+
+        msg = ts.Message(command=ts.Command.RUN, args={"tox": []})
+        await msg.for_dealer().send(socket_a)
+
+        msg = ts.Message(command=ts.Command.CANCEL, args={"command": "RUN"})
+        await msg.for_dealer().send(socket_b)
+
+        response = await ts.Message.recv(socket_b)
+        assert response.command == ts.Command.CANCEL
+        assert response.args["cancelled"] == 1
+
+        response = await ts.Message.recv(socket_a)
+        assert response.args["returncode"] == -1
 
 
 @contextlib.contextmanager
@@ -581,6 +743,28 @@ async def test_cli_error(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> Non
 
         # The context manager will now assert that we got
         # exit_code == 1, which indicates a protocol error.
+
+
+@mark_asyncio_timeout(1)
+async def test_cli_cancel(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> None:
+    args = [f"-p{unused_tcp_port:d}", "-hlocalhost", "-ldebug", "cancel"]
+
+    server = zctx.socket(zmq.ROUTER)
+    server.setsockopt(zmq.LINGER, 0)
+    server.bind(f"tcp://127.0.0.1:{unused_tcp_port:d}")
+
+    with server, click_in_process(args, exit_code=0, timeout=0.2) as proc:
+        assert proc.pid is not None
+
+        # We get the quit message, but we won't
+        # respond. This just indicates that the CLI is running.
+        msg = await ts.Message.recv(server)
+        log.debug(repr(msg))
+
+        await msg.respond(ts.Command.CANCEL, args={"cancelled": 0}).send(server)
+
+        # The context manager will now assert that we got
+        # exit_code == 0, which indicates success.
 
 
 @mark_asyncio_timeout(1)

@@ -316,8 +316,6 @@ async def test_client_interrupt_finished_task(
         assert response.command == ts.Command.RUN
         assert response.args["returncode"] == 5
 
-        await asyncio.sleep(0.1)
-
         await msg.cancel().for_dealer().send(socket)
 
         response = await ts.Message.recv(socket)
@@ -550,7 +548,7 @@ async def test_cli_timeout(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> N
     server.setsockopt(zmq.LINGER, 0)
     server.bind(f"tcp://127.0.0.1:{unused_tcp_port:d}")
 
-    with server, click_in_process(args, exit_code=2) as proc:
+    with server, click_in_process(args, exit_code=2, timeout=0.2) as proc:
         assert proc.pid is not None
 
         # We get the quit message, but we won't
@@ -558,12 +556,8 @@ async def test_cli_timeout(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> N
         msg = await ts.Message.recv(server)
         log.debug(repr(msg))
 
-        # Wait the duration of the timeout, but which may have already
-        # happened in the subporcess
-
-        await asyncio.sleep(0.1)
-        proc.join(0.1)
-        assert not proc.is_alive()
+        # The context manager will now assert that we got
+        # exit_code == 2, which indicates a timeout.
 
 
 @mark_asyncio_timeout(1)
@@ -585,9 +579,8 @@ async def test_cli_error(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> Non
         response = msg.respond(command=ts.Command.ERR, args={"message": "An error occured"})
         await response.send(server)
 
-        await asyncio.sleep(0.1)
-        proc.join(0.1)
-        assert not proc.is_alive()
+        # The context manager will now assert that we got
+        # exit_code == 1, which indicates a protocol error.
 
 
 @mark_asyncio_timeout(1)
@@ -611,9 +604,8 @@ async def test_cli_argparse(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> 
         response = msg.respond(command=ts.Command.RUN, args={"returncode": 0, "args": msg.args["tox"]})
         await response.send(server)
 
-        await asyncio.sleep(0.1)
-        proc.join(0.1)
-        assert not proc.is_alive()
+        # The context manager will now assert that we got
+        # exit_code == 0, which indicates a successful exit.
 
 
 class TestMessage:

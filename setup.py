@@ -12,7 +12,7 @@ with open(path.join(here, "README.md"), encoding="utf-8") as f:
 
 setup(
     name="tox_server",
-    version="0.2.1",
+    version="0.2.2",
     author="Alex Rudy",
     author_email="alex.rudy@gmail.com",
     description="A mini tox server for calling tox in a loop",
@@ -31,6 +31,7 @@ setup(
         "Topic :: Utilities",
     ],
     keywords="utilties tox testing",
+    py_modules=["tox_server"],
     packages=find_packages(),
     python_requires=">=3.7, <4",
     entry_points={"console_scripts": ["tox-server = tox_server:main"]},

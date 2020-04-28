@@ -1,8 +1,10 @@
 import asyncio
+import base64
 import contextlib
 import dataclasses as dc
 import functools
 import json
+import logging
 import multiprocessing as mp
 import os
 import signal
@@ -27,6 +29,8 @@ if sys.version_info < (3, 8):
     # On python 3.7 and earlier, the builtin mock doesn't support AsyncMock,
     # so we grab the backported version from pypi
     import mock  # type: ignore  # noqa: F811
+
+log = logging.getLogger("tox_server.tests")
 
 F = TypeVar("F", bound=Callable)
 
@@ -72,18 +76,23 @@ def mock_publisher() -> zmq.asyncio.Socket:
 
 @pytest.fixture()
 def mock_stream() -> asyncio.StreamReader:
-    first = True
+    reads = 2
 
-    async def reader(n: int = 1) -> bytes:
-        nonlocal first
-        if first:
-            first = False
+    async def read(n: int = 1) -> bytes:
+        nonlocal reads
+        while reads:
+            reads -= 1
             return b"hello"
         else:
             return b""
 
+    def at_eof() -> bool:
+        nonlocal reads
+        return reads == 0
+
     stream = mock.AsyncMock(asyncio.StreamReader)  # type: ignore
-    stream.read.side_effect = reader
+    stream.read.side_effect = read
+    stream.at_eof.side_effect = at_eof
     return stream
 
 
@@ -97,20 +106,25 @@ def zctx() -> zmq.asyncio.Context:
 
 @mark_asyncio_timeout(1)
 @pytest.mark.parametrize("tee", [True, False])
-async def test_send_output(tee: bool, mock_stream: asyncio.StreamReader, mock_publisher: zmq.asyncio.Socket) -> None:
+async def test_send_output(tee: bool, mock_stream: asyncio.StreamReader, zctx: zmq.asyncio.Context) -> None:
+
+    sender = zctx.socket(zmq.PAIR)
+    sender.bind("inproc://test-send-output")
+
+    reciever = zctx.socket(zmq.PAIR)
+    reciever.connect("inproc://test-send-output")
 
     message = ts.Message(command=ts.Command.RUN, args=None)
-    task = asyncio.create_task(ts.publish_output(mock_stream, mock_publisher, message, ts.Stream.STDOUT, tee=tee))
+    task = asyncio.create_task(ts.publish_output(mock_stream, sender, message, ts.Stream.STDOUT, tee=tee))
 
-    await asyncio.sleep(0.1)
+    msg = await reciever.recv_json()
+
+    assert base64.b85decode(msg["args"]["data"].encode("ascii"))
+
     task.cancel()
-
     await asyncio.wait((task,), timeout=1)
 
-    assert task.cancelled()
-
     mock_stream.read.assert_called()  # type: ignore
-    mock_publisher.send_multipart.assert_called()
 
 
 @dc.dataclass
@@ -146,9 +160,9 @@ async def process(monkeypatch: Any, event_loop: Any) -> SubprocessManager:
     returncode: asyncio.Future[int] = event_loop.create_future()
 
     async def proc_wait() -> int:
-        ts.log.debug("Waiting for returncode")
+        log.debug("Waiting for returncode")
         rc = await asyncio.wait_for(asyncio.shield(returncode), timeout=1)
-        ts.log.debug(f"Got returncode: {rc}")
+        log.debug(f"Got returncode: {rc}")
         return rc
 
     def proc_terminate() -> None:
@@ -214,7 +228,7 @@ async def test_run_command(process: SubprocessManager, mock_publisher: zmq.async
 
         await asyncio.wait((task,), timeout=0.2)
 
-        ts.log.debug(f"Cancelling tox future {task!r}")
+        log.debug(f"Cancelling tox future {task!r}")
         task.cancel()
 
         rv = await task
@@ -294,7 +308,7 @@ async def test_client_interrupt_finished_task(
     with zctx.socket(zmq.DEALER) as socket:
         socket.connect(uri.connect)
         msg = ts.Message(command=ts.Command.RUN, args={"tox": []})
-        ts.log.debug(f"CSend: {msg}")
+        log.debug(f"CSend: {msg}")
         await msg.for_dealer().send(socket)
         process.returncode.set_result(5)
 
@@ -320,11 +334,11 @@ async def test_client_interrupt_unknown_task(
         socket.connect(uri.connect)
 
         msg = ts.Message(command=ts.Command.RUN, args={"tox": []})
-        ts.log.debug(f"CSend: {msg}")
+        log.debug(f"CSend: {msg}")
         await msg.for_dealer().send(socket)
 
         msg = ts.Message(command=ts.Command.RUN, args={"tox": []})
-        ts.log.debug(f"CSend: {msg}")
+        log.debug(f"CSend: {msg}")
         await msg.for_dealer().send(socket)
 
         response = await ts.Message.recv(socket)
@@ -333,7 +347,7 @@ async def test_client_interrupt_unknown_task(
         assert response.args["command"] == "RUN"
 
         msg = ts.Message(command=ts.Command.QUIT, args=None)
-        ts.log.debug(f"CSend: {msg}")
+        log.debug(f"CSend: {msg}")
         await msg.for_dealer().send(socket)
         process.returncode.set_result(2)
         response = await ts.Message.recv(socket)
@@ -348,7 +362,7 @@ async def test_client_repeat_task(
         socket.connect(uri.connect)
 
         cancel_msg = ts.Message(command=ts.Command.CANCEL, args={"command": "RUN"})
-        ts.log.debug(f"CSend: {cancel_msg}")
+        log.debug(f"CSend: {cancel_msg}")
         await cancel_msg.for_dealer().send(socket)
 
         response = await ts.Message.recv(socket)
@@ -511,14 +525,14 @@ async def test_cli_interrupt(unused_tcp_port: int, zctx: zmq.asyncio.Context) ->
         # We get the quit message, but we won't
         # respond. This just indicates that the CLI is running.
         msg = await ts.Message.recv(server)
-        ts.log.debug(repr(msg))
+        log.debug(repr(msg))
 
         # First signal sends CANCEL
         os.kill(proc.pid, signal.SIGINT)
         # We get the cancel message, but we won't
         # respond. This again indicates that the CLI is running.
         msg = await ts.Message.recv(server)
-        ts.log.debug(repr(msg))
+        log.debug(repr(msg))
 
         assert proc.is_alive()
 
@@ -542,7 +556,7 @@ async def test_cli_timeout(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> N
         # We get the quit message, but we won't
         # respond. This just indicates that the CLI is running.
         msg = await ts.Message.recv(server)
-        ts.log.debug(repr(msg))
+        log.debug(repr(msg))
 
         # Wait the duration of the timeout, but which may have already
         # happened in the subporcess
@@ -566,7 +580,7 @@ async def test_cli_error(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> Non
         # We get the quit message, but we won't
         # respond. This just indicates that the CLI is running.
         msg = await ts.Message.recv(server)
-        ts.log.debug(repr(msg))
+        log.debug(repr(msg))
 
         response = msg.respond(command=ts.Command.ERR, args={"message": "An error occured"})
         await response.send(server)
@@ -590,7 +604,7 @@ async def test_cli_argparse(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> 
         # We get the quit message, but we won't
         # respond. This just indicates that the CLI is running.
         msg = await ts.Message.recv(server)
-        ts.log.debug(repr(msg))
+        log.debug(repr(msg))
 
         assert msg.args["tox"] == ["--foo", "--", "--arg-here"]
 

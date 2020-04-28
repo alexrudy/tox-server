@@ -285,11 +285,7 @@ async def publish_output(
             )
             await message.send(socket)
         else:
-            # No data was recieved, but we should yield back
-            # to the event loop so we don't get stuck here.
-            # Ideally, we'd not let .read() return with 0 bytes
-            # but that doesn't seem to be possible with asyncio?
-            await asyncio.sleep(0.1)
+            break
         if tee:
             stream.fwrite(data)
 

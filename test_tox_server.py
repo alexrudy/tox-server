@@ -526,52 +526,6 @@ async def test_server_quit_and_drain(
         assert ts.Command.QUIT in responses
 
 
-@mark_asyncio_timeout(1)
-async def test_server_quit_and_drain_multisource(
-    server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
-) -> None:
-
-    with zctx.socket(zmq.DEALER) as socket_a, zctx.socket(zmq.DEALER) as socket_b:
-        socket_a.connect(uri.connect)
-        socket_b.connect(uri.connect)
-
-        msg = ts.Message(command=ts.Command.RUN, args={"tox": []})
-        await msg.for_dealer().send(socket_a)
-
-        msg = ts.Message(command=ts.Command.QUIT, args=None)
-        await msg.for_dealer().send(socket_b)
-        process.returncode.set_result(2)
-
-        response = await ts.Message.recv(socket_b)
-        assert response.command == ts.Command.QUIT
-
-        response = await ts.Message.recv(socket_a)
-        assert response.args["returncode"] == 2
-
-
-@mark_asyncio_timeout(1)
-async def test_server_cancel_multisource(
-    server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
-) -> None:
-
-    with zctx.socket(zmq.DEALER) as socket_a, zctx.socket(zmq.DEALER) as socket_b:
-        socket_a.connect(uri.connect)
-        socket_b.connect(uri.connect)
-
-        msg = ts.Message(command=ts.Command.RUN, args={"tox": []})
-        await msg.for_dealer().send(socket_a)
-
-        msg = ts.Message(command=ts.Command.CANCEL, args={"command": "RUN"})
-        await msg.for_dealer().send(socket_b)
-
-        response = await ts.Message.recv(socket_b)
-        assert response.command == ts.Command.CANCEL
-        assert response.args["cancelled"] == 1
-
-        response = await ts.Message.recv(socket_a)
-        assert response.args["returncode"] == -1
-
-
 @contextlib.contextmanager
 def click_in_process(args: List[str], exit_code: int = 0, timeout: float = 0.1) -> Iterator[mp.Process]:
     (recv, send) = mp.Pipe()

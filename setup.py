@@ -31,7 +31,6 @@ setup(
         "Topic :: Utilities",
     ],
     keywords="utilties tox testing",
-    py_modules=["tox_server"],
     packages=find_packages(),
     python_requires=">=3.7, <4",
     entry_points={"console_scripts": ["tox-server = tox_server:main"]},

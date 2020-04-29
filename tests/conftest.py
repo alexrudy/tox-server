@@ -2,9 +2,12 @@ import asyncio
 import logging
 from typing import Any
 from typing import AsyncIterator
+from typing import List
 
 import pytest
 import zmq.asyncio
+from pytest import Item
+from pytest_mypy import MypyFileItem
 
 from .helpers import mock
 from .helpers import run_server
@@ -13,6 +16,14 @@ from .helpers import SubprocessState
 from .helpers import URI
 
 log = logging.getLogger(__name__)
+
+
+def pytest_collection_modifyitems(items: List[Item]) -> None:
+    items[:] = [
+        item
+        for item in items[:]
+        if not (isinstance(item, MypyFileItem) and item.fspath.basename in {"setup.py", "tasks.py"})
+    ]
 
 
 @pytest.fixture()

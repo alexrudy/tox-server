@@ -1,0 +1,7 @@
+bump2version
+wheel
+twine
+tox
+coverage
+invoke
+-r test-requirements.txt

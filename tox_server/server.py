@@ -41,6 +41,7 @@ class Server:
         self.zctx = zctx or zmq.asyncio.Context()
 
         self.tasks: Dict[Tuple[Command, Tuple[bytes, ...]], asyncio.Future] = {}
+        self.beats: Dict[Tuple[Command, Tuple[bytes, ...]], asyncio.Future] = {}
         self._timeout = 0.1
 
     async def serve_forever(self) -> None:
@@ -67,7 +68,7 @@ class Server:
 
         # Tracks pending coroutines
         self.tasks = {}
-
+        self.beats = {}
         self.socket = self.zctx.socket(zmq.ROUTER)
         self.socket.bind(self.uri)
 
@@ -103,6 +104,8 @@ class Server:
         """Ensure any remianing tasks are awaited"""
         if self.tasks:
             await asyncio.wait(self.tasks.values())
+        if self.beats:
+            await asyncio.wait(self.beats.values())
 
     async def process(self) -> None:
         """Process message events, dispatching handling to other futures.
@@ -122,7 +125,20 @@ class Server:
                         )
                     )
                 else:
+                    if msg.timeout:
+                        self.beats[(msg.command, msg.identifier)] = asyncio.create_task(
+                            self.run_heartbeat(msg, msg.timeout / 2.0)
+                        )
                     self.tasks[(msg.command, msg.identifier)] = asyncio.create_task(self.handle(msg))
+
+    async def run_heartbeat(self, template: Message, period: float) -> None:
+        log.debug(f"Starting heartbeat: {template}")
+        with contextlib.suppress(asyncio.CancelledError):
+            while not self.shutdown.is_set():
+                msg = template.respond(Command.HEARTBEAT, args={"now": time.time()})
+                await msg.send(self.socket)
+                await asyncio.wait((self.shutdown.wait(),), timeout=period)
+        log.debug(f"Ending heartbeat: {template}")
 
     async def recv(self) -> Message:
         """Recieve a message which conforms to the tox-server protocol
@@ -170,6 +186,9 @@ class Server:
             await self.send(err)
         finally:
             self.tasks.pop((msg.command, msg.identifier), None)
+            beat = self.beats.pop((msg.command, msg.identifier), None)
+            if beat:
+                beat.cancel()
             log.debug(f"Finished handling {msg!r}")
 
     async def handle_interrupt(self, msg: Message) -> None:

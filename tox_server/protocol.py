@@ -44,6 +44,9 @@ class Command(enum.Enum):
 
     HEARTBEAT = enum.auto()
     #: Issued to let a client know the server is still alive.
+    
+    RESTART = enum.auto()
+    #: Restart the tox server
 
 
 @dc.dataclass(frozen=True)

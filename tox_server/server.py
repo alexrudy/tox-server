@@ -145,10 +145,10 @@ class Server:
     async def run_heartbeat(self, template: Message, period: float) -> None:
         log.debug(f"Starting heartbeat: {template}")
         with contextlib.suppress(asyncio.CancelledError):
-            while not self.shutdown.is_set():
+            while not self.shutdown_event.is_set():
                 msg = template.respond(Command.HEARTBEAT, args={"now": time.time()})
                 await msg.send(self.socket)
-                await asyncio.wait((self.shutdown.wait(),), timeout=period)
+                await asyncio.wait((self.shutdown_event.wait(),), timeout=period)
         log.debug(f"Ending heartbeat: {template}")
 
     async def recv(self) -> Message:

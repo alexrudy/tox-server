@@ -290,3 +290,34 @@ async def test_server_quit_and_drain(
 
         assert responses[Command.RUN].args["returncode"] == 2
         assert Command.QUIT in responses
+
+
+@mark_asyncio_timeout(1)
+async def test_server_heartbeat(
+    server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
+) -> None:
+
+    with zctx.socket(zmq.DEALER) as socket:
+        socket.connect(uri.connect)
+
+        msg = Message(command=Command.RUN, args={"tox": []}, timeout=0.1)
+        await msg.for_dealer().send(socket)
+
+        await asyncio.sleep(0.1)
+
+        msg = Message(command=Command.QUIT, args=None)
+        await msg.for_dealer().send(socket)
+
+        process.returncode.set_result(2)
+
+        responses = {}
+
+        while True:
+            response = await Message.recv(socket)
+            responses[response.command] = response
+            if response.command == Command.RUN:
+                break
+
+        assert responses[Command.RUN].args["returncode"] == 2
+        assert Command.QUIT in responses
+        assert Command.HEARTBEAT in responses

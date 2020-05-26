@@ -86,6 +86,8 @@ async def client(
             response = await asyncio.wait_for(Message.recv(client), timeout=timeout)
             if response.command == Command.OUTPUT:
                 Stream[response.args["stream"]].fwrite(base64.b85decode(response.args["data"]))
+            elif response.command == Command.HEARTBEAT:
+                pass  # Ensures that we don't timeout above.
             else:
                 # Note: this assumes that OUTPUT is the only command which shouldn't end
                 # the await loop above, which might not be true...
@@ -132,7 +134,7 @@ def run(ctx: click.Context) -> None:
     tox_args = unparse_arguments(tuple(ctx.args))
     cfg = ctx.find_object(dict)
 
-    message = Message(command=Command.RUN, args={"tox": tox_args})
+    message = Message(command=Command.RUN, args={"tox": tox_args}, timeout=cfg["timeout"])
     response = run_client(cfg["uri"], message, timeout=cfg["timeout"])
 
     proc: subprocess.CompletedProcess = subprocess.CompletedProcess(

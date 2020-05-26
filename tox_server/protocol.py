@@ -37,6 +37,9 @@ class Command(enum.Enum):
     CANCEL = enum.auto()
     #: Cancel a running tox command
 
+    HEARTBEAT = enum.auto()
+    #: Issued to let a client know the server is still alive.
+
 
 @dc.dataclass(frozen=True)
 class Message:
@@ -50,6 +53,9 @@ class Message:
 
     identifiers: Optional[Tuple[bytes, ...]] = None
     #: ZMQ-specific socket identifiers
+
+    timeout: Optional[float] = None
+    #: Optional timeout, indicateds heartbeat period
 
     @classmethod
     def parse(cls, message: List[bytes]) -> "Message":
@@ -88,16 +94,20 @@ class Message:
         except KeyError as e:
             raise ProtocolError.from_message(message=f"JSON missing key: {e}", identifiers=tuple(identifiers))
 
+        timeout = mdata.get("timeout", None)
+        if not isinstance(timeout, (float, type(None))):
+            timeout = None
+
         try:
             command = Command[command]
         except KeyError:
             raise ProtocolError.from_message(message=f"Unknown command: {command}", identifiers=tuple(identifiers))
 
-        return cls(command=command, args=args, identifiers=tuple(identifiers))
+        return cls(command=command, args=args, identifiers=tuple(identifiers), timeout=timeout)
 
     def assemble(self) -> List[bytes]:
         """Assemble this message for sending"""
-        message = json.dumps({"command": self.command.name, "args": self.args}).encode("utf-8")
+        message = json.dumps({"command": self.command.name, "args": self.args, "timeout": self.timeout}).encode("utf-8")
         if self.identifiers:
             return list(self.identifiers) + [message]
         return [message]

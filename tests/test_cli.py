@@ -21,7 +21,9 @@ log = logging.getLogger(__name__)
 
 
 @contextlib.contextmanager
-def click_in_process(args: List[str], exit_code: int = 0, timeout: float = 0.1) -> Iterator[mp.Process]:
+def click_in_process(
+    args: List[str], exit_code: int = 0, timeout: float = 0.1, check_exit_code: bool = True
+) -> Iterator[mp.Process]:
     (recv, send) = mp.Pipe()
     started = mp.Event()
     proc = mp.Process(target=_click_process_target, args=(args, send, started), name="cli-process")
@@ -33,7 +35,8 @@ def click_in_process(args: List[str], exit_code: int = 0, timeout: float = 0.1) 
 
         if recv.poll(timeout):
             result = recv.recv()
-            assert result.exit_code == exit_code
+            if check_exit_code:
+                assert result.exit_code == exit_code
         else:
             raise ValueError("No result recieved from command {args!r}")
 
@@ -63,9 +66,9 @@ def _click_process_target(args: List[str], chan: Any, event: Any) -> None:
 
 
 @contextlib.contextmanager
-def server_in_process(port: int) -> Iterator[mp.Process]:
+def server_in_process(port: int, exit_code: int = 0, check_exit_code: bool = True) -> Iterator[mp.Process]:
     args = [f"-p{port:d}", "-b127.0.0.1", "serve"]
-    with click_in_process(args) as proc:
+    with click_in_process(args, exit_code=exit_code, check_exit_code=check_exit_code) as proc:
         yield proc
 
 
@@ -238,3 +241,30 @@ async def test_cli_argparse(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> 
 
         # The context manager will now assert that we got
         # exit_code == 0, which indicates a successful exit.
+
+
+def test_server_cli_interrupt(unused_tcp_port: int) -> None:
+    """Test how the server process responds to interruptions"""
+
+    with server_in_process(unused_tcp_port, exit_code=0) as proc:
+        # Ensure we can roundtrip with the server before killing it.
+        runner = click.testing.CliRunner()
+        result = runner.invoke(cli.main, args=[f"-p{unused_tcp_port:d}", "-hlocalhost", "ping"])
+        assert result.exit_code == 0
+
+        assert proc.pid is not None
+        os.kill(proc.pid, signal.SIGINT)
+
+
+def test_server_cli_term(unused_tcp_port: int) -> None:
+    """Test how the server process responds to interruptions"""
+
+    with server_in_process(unused_tcp_port, exit_code=0) as proc:
+
+        # Ensure we can roundtrip with the server before killing it.
+        runner = click.testing.CliRunner()
+        result = runner.invoke(cli.main, args=[f"-p{unused_tcp_port:d}", "-hlocalhost", "ping"])
+        assert result.exit_code == 0
+
+        assert proc.pid is not None
+        os.kill(proc.pid, signal.SIGTERM)

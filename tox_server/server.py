@@ -1,6 +1,7 @@
 import asyncio
 import contextlib
 import logging
+import signal
 import time
 from typing import Dict
 from typing import Optional
@@ -9,6 +10,7 @@ from typing import Tuple
 import click
 import zmq.asyncio
 
+from .interrupt import interrupt_handler
 from .process import tox_command
 from .protocol import Command
 from .protocol import Message
@@ -60,7 +62,7 @@ class Server:
         """
 
         # Event used to indicate that the server should finish gracefully.
-        self.shutdown = asyncio.Event()
+        self.shutdown_event = asyncio.Event()
 
         # The lock is used to ensure that only a single tox subprocess
         # can run at any given time.
@@ -75,18 +77,27 @@ class Server:
         log.info(f"Running server at {self.uri}")
         log.info(f"^C to exit")
         try:
-            task = asyncio.create_task(self.process())
-            await self.shutdown.wait()
-            await self.drain()
+            self._processor = asyncio.create_task(self.process())
+
+            with interrupt_handler(signal.SIGTERM, self.shutdown, oneshot=True), interrupt_handler(
+                signal.SIGINT, self.shutdown, oneshot=True
+            ):
+                await self.shutdown_event.wait()
+                await self.drain()
         except asyncio.CancelledError:
             log.info("Server cancelled")
         except BaseException:
             log.exception("Server loop error")
             raise
         finally:
-            task.cancel()
+            self._processor.cancel()
             self.socket.close()
         log.debug(f"Server is done.")
+
+    async def shutdown(self) -> None:
+        """Shutdown this server, cancelling processing tasks"""
+        self.shutdown_event.set()
+        self._processor.cancel()
 
     async def send(self, message: Message) -> None:
         """Send a message over the server's ZMQ socket
@@ -115,7 +126,7 @@ class Server:
         frames provided by ZMQ.
 
         """
-        while not self.shutdown.is_set():
+        while not self.shutdown_event.is_set():
             with contextlib.suppress(ProtocolError):
                 msg = await self.recv()
                 if (msg.command, msg.identifier) in self.tasks:
@@ -245,7 +256,7 @@ class Server:
 
         Quit starts a graceful shutdown process for the server.
         """
-        self.shutdown.set()
+        self.shutdown_event.set()
         log.debug("Requesting shutdown")
         await self.send(msg.respond(Command.QUIT, "DONE"))
 

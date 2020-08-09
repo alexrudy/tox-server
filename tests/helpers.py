@@ -9,6 +9,7 @@ from typing import Any
 from typing import AsyncIterator
 from typing import Awaitable
 from typing import Callable
+from typing import cast
 from typing import Tuple
 from typing import TypeVar
 
@@ -39,7 +40,7 @@ def mark_asyncio_timeout(timeout: int) -> Callable:
         async def wrapper(*args: Any, **kwargs: Any) -> Any:
             return await asyncio.wait_for(f(*args, **kwargs), timeout=timeout)
 
-        return wrapper
+        return cast(F, wrapper)
 
     return _inner
 
@@ -67,7 +68,7 @@ class SubprocessManager:
         return self.state.returncode
 
 
-async def ensure_task_finished(task: asyncio.Future) -> None:
+async def ensure_task_finished(task: asyncio.Future) -> bool:
     await asyncio.wait((task,), timeout=0.1)
     exc = task.exception()
     if exc is not None:

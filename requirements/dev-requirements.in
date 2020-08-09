@@ -4,4 +4,5 @@ twine
 tox
 coverage
 invoke
+pip-tools
 -r test-requirements.txt

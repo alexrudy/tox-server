@@ -3,6 +3,25 @@ from invoke import task
 
 
 @task
+def lock(c, sync=True):
+    """Lock dependencies"""
+    c.config["run"]["echo"] = True
+    c.run("pip-compile requirements/test-requirements.in")
+    c.run("pip-compile requirements/dev-requirements.in")
+    if sync:
+        sync_requirements(c, dev=True)
+
+
+@task(name="sync")
+def sync_requirements(c, dev=False):
+    """Install dependencies"""
+    dev_requirements = "requirements/dev-requirements.txt" if dev else ""
+
+    c.run(f"pip-sync requirements/test-requirements.txt {dev_requirements}")
+    c.run("pip install -e .")
+
+
+@task
 def clean_build(c):
     """remove Python build artifacts"""
     c.run("rm -fr build/")

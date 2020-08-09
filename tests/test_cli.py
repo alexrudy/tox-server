@@ -289,6 +289,3 @@ def test_cli_loglevel() -> None:
 
     result = runner.invoke(cmd, ["--level", "foo"])
     assert result.exit_code == 2
-
-    result = runner.invoke(cmd, [])
-    assert result.exit_code == 2

@@ -268,3 +268,24 @@ def test_server_cli_term(unused_tcp_port: int) -> None:
 
         assert proc.pid is not None
         os.kill(proc.pid, signal.SIGTERM)
+
+
+def test_cli_loglevel() -> None:
+
+    runner = click.testing.CliRunner()
+
+    @click.command()
+    @click.option("--level", type=cli.LogLevelParamType(), default=None)
+    def cmd(level: int) -> None:
+        print(level)
+
+    result = runner.invoke(cmd, ["--level", "INFO"])
+    assert result.exit_code == 0
+    assert int(result.output.strip()) == logging.INFO
+
+    result = runner.invoke(cmd, ["--level", "15"])
+    assert result.exit_code == 0
+    assert int(result.output.strip()) == 15
+
+    result = runner.invoke(cmd, ["--level", "foo"])
+    assert result.exit_code == 2

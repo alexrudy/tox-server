@@ -5,6 +5,7 @@ import logging
 import signal
 import subprocess
 import sys
+import time
 from typing import Optional
 from typing import Tuple
 
@@ -78,6 +79,10 @@ async def client(
 
     sigint_callback = functools.partial(send_interrupt, socket=client, message=message)
 
+    state = "QUEUED"
+    start = time.time()
+    noisy = True
+
     with interrupt_handler(signal.SIGINT, sigint_callback, oneshot=True), client:
 
         await message.for_dealer().send(client)
@@ -87,11 +92,16 @@ async def client(
             if response.command == Command.OUTPUT:
                 Stream[response.args["stream"]].fwrite(base64.b85decode(response.args["data"]))
             elif response.command == Command.HEARTBEAT:
-                pass  # Ensures that we don't timeout above.
+                # Ensures that we don't timeout above.
+                state = response.args["state"]
             else:
                 # Note: this assumes that OUTPUT is the only command which shouldn't end
                 # the await loop above, which might not be true...
                 break
+
+            if noisy and time.time() - start > 1.0 and state == "QUEUED":
+                noisy = False
+                click.echo(f"Command {message.command} is queued")
 
     return response
 

@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import enum
 import logging
 import signal
 import time
@@ -20,6 +21,11 @@ from .protocol import ProtocolFailure
 log = logging.getLogger(__name__)
 
 __all__ = ["Server", "serve"]
+
+
+class TaskState(enum.Enum):
+    QUEUED = 1
+    STARTED = 2
 
 
 class Server:
@@ -44,6 +50,7 @@ class Server:
 
         self.tasks: Dict[Tuple[Command, Tuple[bytes, ...]], asyncio.Future] = {}
         self.beats: Dict[Tuple[Command, Tuple[bytes, ...]], asyncio.Future] = {}
+        self.states: Dict[Tuple[Command, Tuple[bytes, ...]], TaskState] = {}
         self._timeout = 0.1
 
     async def serve_forever(self) -> None:
@@ -74,8 +81,8 @@ class Server:
         self.socket = self.zctx.socket(zmq.ROUTER)
         self.socket.bind(self.uri)
 
-        log.info(f"Running server at {self.uri}")
-        log.info(f"^C to exit")
+        log.info("Running server at {self.uri}")
+        log.info("^C to exit")
         try:
             self._processor = asyncio.create_task(self.process())
 
@@ -92,7 +99,7 @@ class Server:
         finally:
             self._processor.cancel()
             self.socket.close()
-        log.debug(f"Server is done.")
+        log.debug("Server is done.")
 
     async def shutdown(self) -> None:
         """Shutdown this server, cancelling processing tasks"""
@@ -141,14 +148,20 @@ class Server:
                             self.run_heartbeat(msg, msg.timeout / 2.0)
                         )
                     self.tasks[(msg.command, msg.identifier)] = asyncio.create_task(self.handle(msg))
+                    self.states[(msg.command, msg.identifier)] = TaskState.QUEUED
 
     async def run_heartbeat(self, template: Message, period: float) -> None:
         log.debug(f"Starting heartbeat: {template}")
         with contextlib.suppress(asyncio.CancelledError):
             while not self.shutdown_event.is_set():
-                msg = template.respond(Command.HEARTBEAT, args={"now": time.time()})
-                await msg.send(self.socket)
-                await asyncio.wait((self.shutdown_event.wait(),), timeout=period)
+                try:
+                    state = getattr(self.states.get((template.command, template.identifier), None), "name", None)
+                    msg = template.respond(Command.HEARTBEAT, args={"now": time.time(), "state": state})
+                    await msg.send(self.socket)
+                    await asyncio.wait((self.shutdown_event.wait(),), timeout=period)
+                except Exception:
+                    log.exception("Heartbeat exception")
+                    raise
         log.debug(f"Ending heartbeat: {template}")
 
     async def recv(self) -> Message:
@@ -201,6 +214,7 @@ class Server:
             if beat:
                 beat.cancel()
             log.debug(f"Finished handling {msg!r}")
+            self.states.pop((msg.command, msg.identifier), None)
 
     async def handle_interrupt(self, msg: Message) -> None:
         """Handles an interrupt message
@@ -209,6 +223,8 @@ class Server:
         it will be cancelled. Any task can be cancelled, but this is really
         only useful for cancelling RUN tasks.
         """
+        self.states[(msg.command, msg.identifier)] = TaskState.STARTED
+
         try:
             target = Command[msg.args["command"]]
         except KeyError:
@@ -227,6 +243,8 @@ class Server:
 
         If the client has any commands of this type, they will be cancelled
         """
+        self.states[(msg.command, msg.identifier)] = TaskState.STARTED
+
         try:
             target = Command[msg.args["command"]]
         except KeyError:
@@ -248,6 +266,7 @@ class Server:
         server to ensure that only one tox process runs at a time.
         """
         async with self.lock:
+            self.states[(msg.command, msg.identifier)] = TaskState.STARTED
             result = await tox_command(msg.args["tox"], self.socket, msg, tee=self.tee)
         await self.send(msg.respond(Command.RUN, {"returncode": result.returncode, "args": result.args}))
 
@@ -256,6 +275,8 @@ class Server:
 
         Quit starts a graceful shutdown process for the server.
         """
+        self.states[(msg.command, msg.identifier)] = TaskState.STARTED
+
         self.shutdown_event.set()
         log.debug("Requesting shutdown")
         await self.send(msg.respond(Command.QUIT, "DONE"))

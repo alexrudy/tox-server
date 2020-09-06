@@ -78,7 +78,7 @@ class Message:
 
         if mpart == b"" and ((not identifiers) or identifiers[-1] != b""):
             raise ProtocolError.from_message(
-                message=f"Invalid message missing content", identifiers=tuple(identifiers) + (b"",)
+                message="Invalid message missing content", identifiers=tuple(identifiers) + (b"",)
             )
 
         if identifiers and not identifiers[-1] == b"":

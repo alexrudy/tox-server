@@ -8,6 +8,7 @@ import sys
 from typing import Any
 from typing import Iterator
 from typing import List
+from typing import Optional
 
 import click.testing
 import zmq.asyncio
@@ -22,7 +23,11 @@ log = logging.getLogger(__name__)
 
 @contextlib.contextmanager
 def click_in_process(
-    args: List[str], exit_code: int = 0, timeout: float = 0.1, check_exit_code: bool = True
+    args: List[str],
+    exit_code: int = 0,
+    timeout: float = 0.1,
+    check_exit_code: bool = True,
+    check_output: Optional[str] = None,
 ) -> Iterator[mp.Process]:
     (recv, send) = mp.Pipe()
     started = mp.Event()
@@ -37,6 +42,8 @@ def click_in_process(
             result = recv.recv()
             if check_exit_code:
                 assert result.exit_code == exit_code
+            if check_output:
+                assert check_output in result.output
         else:
             raise ValueError("No result recieved from command {args!r}")
 
@@ -235,6 +242,34 @@ async def test_cli_argparse(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> 
         log.debug(repr(msg))
 
         assert msg.args["tox"] == ["--foo", "--", "--arg-here"]
+
+        response = msg.respond(command=Command.RUN, args={"returncode": 0, "args": msg.args["tox"]})
+        await response.send(server)
+
+        # The context manager will now assert that we got
+        # exit_code == 0, which indicates a successful exit.
+
+
+@mark_asyncio_timeout(1)
+async def test_cli_slow_message(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> None:
+    args = [f"-p{unused_tcp_port:d}", "-hlocalhost", "-ldebug", "run", "--foo", "--", "--arg-here"]
+
+    server = zctx.socket(zmq.ROUTER)
+    server.setsockopt(zmq.LINGER, 0)
+    server.bind(f"tcp://127.0.0.1:{unused_tcp_port:d}")
+
+    with server, click_in_process(args, exit_code=0, check_output="Command RUN is queued") as proc:
+        assert proc.pid is not None
+
+        # We get the quit message, but we won't
+        # respond. This just indicates that the CLI is running.
+        msg = await Message.recv(server)
+        log.debug(repr(msg))
+
+        assert msg.args["tox"] == ["--foo", "--", "--arg-here"]
+
+        heartbeat = msg.respond(command=Command.HEARTBEAT, args={"state": "QUEUED"})
+        await heartbeat.send(server)
 
         response = msg.respond(command=Command.RUN, args={"returncode": 0, "args": msg.args["tox"]})
         await response.send(server)

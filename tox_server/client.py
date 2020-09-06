@@ -5,7 +5,6 @@ import logging
 import signal
 import subprocess
 import sys
-import time
 from typing import Optional
 from typing import Tuple
 
@@ -80,8 +79,7 @@ async def client(
     sigint_callback = functools.partial(send_interrupt, socket=client, message=message)
 
     state = "QUEUED"
-    start = time.time()
-    noisy = True
+    has_printed_output = False
 
     with interrupt_handler(signal.SIGINT, sigint_callback, oneshot=True), client:
 
@@ -90,6 +88,7 @@ async def client(
         while True:
             response = await asyncio.wait_for(Message.recv(client), timeout=timeout)
             if response.command == Command.OUTPUT:
+                has_printed_output = True
                 Stream[response.args["stream"]].fwrite(base64.b85decode(response.args["data"]))
             elif response.command == Command.HEARTBEAT:
                 # Ensures that we don't timeout above.
@@ -99,9 +98,9 @@ async def client(
                 # the await loop above, which might not be true...
                 break
 
-            if noisy and time.time() - start > 1.0 and state == "QUEUED":
-                noisy = False
-                click.echo(f"Command {message.command} is queued")
+            if not has_printed_output and state == "QUEUED":
+                has_printed_output = True
+                click.echo(f"Command {message.command.name} is queued")
 
     return response
 

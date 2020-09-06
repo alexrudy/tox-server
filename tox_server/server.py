@@ -1,10 +1,14 @@
 import asyncio
 import contextlib
+import dataclasses as dc
+import enum
 import logging
 import signal
 import time
 from typing import Dict
+from typing import Generator
 from typing import Optional
+from typing import Set
 from typing import Tuple
 
 import click
@@ -20,6 +24,58 @@ from .protocol import ProtocolFailure
 log = logging.getLogger(__name__)
 
 __all__ = ["Server", "serve"]
+
+
+class TaskState(enum.Enum):
+    INIT = 0
+    QUEUED = 1
+    STARTED = 2
+
+
+TaskID = Tuple[Command, Tuple[bytes, ...]]
+
+
+@dc.dataclass(init=False)
+class Task:
+
+    message: Message
+    action: asyncio.Future
+    heartbeat: asyncio.Future
+    state: TaskState = TaskState.INIT
+
+    def __init__(self, message: Message, server: "Server") -> None:
+        super().__init__()
+        self.message = message
+        self.heartbeat = asyncio.create_task(server.run_heartbeat(self))
+        self.action = asyncio.create_task(server.handle(self))
+        self.state = TaskState.QUEUED
+
+    def __hash__(self) -> int:
+        return hash((self.__class__.__qualname__, self.action, self.heartbeat))
+
+    @property
+    def id(self) -> TaskID:
+        return (self.message.command, self.message.identifier)
+
+    def start(self) -> None:
+        self.state = TaskState.STARTED
+
+    async def beat(self, socket: zmq.asyncio.Socket) -> float:
+        state = self.state.name
+        msg = self.message.respond(Command.HEARTBEAT, args={"now": time.time(), "state": state})
+        await msg.send(socket)
+
+        return (self.message.timeout or 0.0) / 2.0
+
+    def should_beat(self) -> bool:
+        return self.message.timeout is not None
+
+    def cancel(self) -> None:
+        self.action.cancel()
+        self.heartbeat.cancel()
+
+    def __await__(self) -> Generator[None, None, Tuple[Set[asyncio.Future], Set[asyncio.Future]]]:
+        return asyncio.wait((self.action, self.heartbeat), return_when=asyncio.FIRST_EXCEPTION).__await__()
 
 
 class Server:
@@ -42,8 +98,7 @@ class Server:
         self.tee = tee
         self.zctx = zctx or zmq.asyncio.Context()
 
-        self.tasks: Dict[Tuple[Command, Tuple[bytes, ...]], asyncio.Future] = {}
-        self.beats: Dict[Tuple[Command, Tuple[bytes, ...]], asyncio.Future] = {}
+        self.tasks: Dict[TaskID, Task] = {}
         self._timeout = 0.1
 
     async def serve_forever(self) -> None:
@@ -70,12 +125,11 @@ class Server:
 
         # Tracks pending coroutines
         self.tasks = {}
-        self.beats = {}
         self.socket = self.zctx.socket(zmq.ROUTER)
         self.socket.bind(self.uri)
 
-        log.info(f"Running server at {self.uri}")
-        log.info(f"^C to exit")
+        log.info("Running server at {self.uri}")
+        log.info("^C to exit")
         try:
             self._processor = asyncio.create_task(self.process())
 
@@ -92,7 +146,7 @@ class Server:
         finally:
             self._processor.cancel()
             self.socket.close()
-        log.debug(f"Server is done.")
+        log.debug("Server is done.")
 
     async def shutdown(self) -> None:
         """Shutdown this server, cancelling processing tasks"""
@@ -115,8 +169,6 @@ class Server:
         """Ensure any remianing tasks are awaited"""
         if self.tasks:
             await asyncio.wait(self.tasks.values())
-        if self.beats:
-            await asyncio.wait(self.beats.values())
 
     async def process(self) -> None:
         """Process message events, dispatching handling to other futures.
@@ -136,20 +188,23 @@ class Server:
                         )
                     )
                 else:
-                    if msg.timeout:
-                        self.beats[(msg.command, msg.identifier)] = asyncio.create_task(
-                            self.run_heartbeat(msg, msg.timeout / 2.0)
-                        )
-                    self.tasks[(msg.command, msg.identifier)] = asyncio.create_task(self.handle(msg))
+                    task = Task(msg, self)
+                    self.tasks[task.id] = task
 
-    async def run_heartbeat(self, template: Message, period: float) -> None:
-        log.debug(f"Starting heartbeat: {template}")
+    async def run_heartbeat(self, task: Task) -> None:
+        if not task.should_beat():
+            return
+
+        log.debug(f"Starting heartbeat: {task}")
         with contextlib.suppress(asyncio.CancelledError):
             while not self.shutdown_event.is_set():
-                msg = template.respond(Command.HEARTBEAT, args={"now": time.time()})
-                await msg.send(self.socket)
-                await asyncio.wait((self.shutdown_event.wait(),), timeout=period)
-        log.debug(f"Ending heartbeat: {template}")
+                try:
+                    period = await task.beat(self.socket)
+                    await asyncio.wait((self.shutdown_event.wait(),), timeout=period)
+                except Exception:
+                    log.exception("Heartbeat exception")
+                    raise
+        log.debug(f"Ending heartbeat: {task}")
 
     async def recv(self) -> Message:
         """Recieve a message which conforms to the tox-server protocol
@@ -177,7 +232,7 @@ class Server:
         log.debug(f"Recieve: {msg!r}")
         return msg
 
-    async def handle(self, msg: Message) -> None:
+    async def handle(self, task: Task) -> None:
         """Handle a single tox-server protocol message, and respond.
 
         This coroutine is designed to be run as its own task, and will
@@ -186,83 +241,90 @@ class Server:
         ``<command>`` is the name of the command enum in lower case.
         """
         try:
-            await getattr(self, f"handle_{msg.command.name.lower()}")(msg)
+            handler = getattr(self, f"handle_{task.message.command.name.lower()}")
+            await handler(task)
         except asyncio.CancelledError:
-            log.debug(f"Notifying client of cancellation {msg!r}")
-            err = msg.respond(command=Command.ERR, args={"message": f"Command {msg.command.name} was cancelled."})
+            log.debug(f"Notifying client of cancellation {task.message!r}")
+            err = task.message.respond(
+                command=Command.ERR, args={"message": f"Command {task.message.command.name} was cancelled."}
+            )
             await self.send(err)
         except Exception as e:
             log.exception("Error in handler")
-            err = msg.respond(command=Command.ERR, args={"message": str(e)})
+            err = task.message.respond(command=Command.ERR, args={"message": str(e)})
             await self.send(err)
         finally:
-            self.tasks.pop((msg.command, msg.identifier), None)
-            beat = self.beats.pop((msg.command, msg.identifier), None)
-            if beat:
-                beat.cancel()
-            log.debug(f"Finished handling {msg!r}")
+            self.tasks.pop(task.id, None)
+            task.cancel()
+            log.debug(f"Finished handling {task!r}")
 
-    async def handle_interrupt(self, msg: Message) -> None:
+    async def handle_interrupt(self, task: Task) -> None:
         """Handles an interrupt message
 
         If the client has sent a message and that message is processing,
         it will be cancelled. Any task can be cancelled, but this is really
         only useful for cancelling RUN tasks.
         """
+        task.start()
         try:
-            target = Command[msg.args["command"]]
+            target = Command[task.message.args["command"]]
         except KeyError:
-            raise ValueError(f"Unknown command {msg.args['command']}")
+            raise ValueError(f"Unknown command {task.message.args['command']}")
 
-        task = self.tasks.get((target, msg.identifier), None)
-        if task:
+        target_task = self.tasks.get((target, task.message.identifier), None)
+        if target_task:
             log.debug(f"Interrupting {task!r}")
-            task.cancel()
+            target_task.cancel()
         else:
-            log.debug(f"Task to interrupt not found: {msg!r}")
-            await self.send(msg.respond(Command.ERR, {"message": "Could not find task"}))
+            log.debug(f"Task to interrupt not found: {task!r}")
+            await self.send(task.message.respond(Command.ERR, {"message": "Could not find task"}))
 
-    async def handle_cancel(self, msg: Message) -> None:
+    async def handle_cancel(self, task: Task) -> None:
         """Handles a cancel message to cancel all commands of a specific type
 
         If the client has any commands of this type, they will be cancelled
         """
+        task.start()
+
         try:
-            target = Command[msg.args["command"]]
+            target = Command[task.message.args["command"]]
         except KeyError:
-            raise ValueError(f"Unknown command {msg.args['command']}")
+            raise ValueError(f"Unknown command {task.message.args['command']}")
 
         # Do this once so we only cancel tasks in progress when this command was sent.
-        tasks = [task for (command, _), task in self.tasks.items() if command == target]
+        tasks = [tt for (command, _), tt in self.tasks.items() if command == target]
 
-        for task in tasks:
-            log.debug(f"Cancelling {task!r}")
-            task.cancel()
+        for tt in tasks:
+            log.debug(f"Cancelling {target!r}")
+            tt.cancel()
 
-        await self.send(msg.respond(Command.CANCEL, args={"cancelled": len(tasks)}))
+        await self.send(task.message.respond(Command.CANCEL, args={"cancelled": len(tasks)}))
 
-    async def handle_run(self, msg: Message) -> None:
+    async def handle_run(self, task: Task) -> None:
         """Handles a run message to start a tox subprocess.
 
         Runs are controlled by :func:`tox_command`, and locked by the
         server to ensure that only one tox process runs at a time.
         """
         async with self.lock:
-            result = await tox_command(msg.args["tox"], self.socket, msg, tee=self.tee)
-        await self.send(msg.respond(Command.RUN, {"returncode": result.returncode, "args": result.args}))
+            task.start()
+            result = await tox_command(task.message.args["tox"], self.socket, task.message, tee=self.tee)
+        await self.send(task.message.respond(Command.RUN, {"returncode": result.returncode, "args": result.args}))
 
-    async def handle_quit(self, msg: Message) -> None:
+    async def handle_quit(self, task: Task) -> None:
         """Handles a quit message to gracefully shut down.
 
         Quit starts a graceful shutdown process for the server.
         """
+        task.start()
         self.shutdown_event.set()
         log.debug("Requesting shutdown")
-        await self.send(msg.respond(Command.QUIT, "DONE"))
+        await self.send(task.message.respond(Command.QUIT, "DONE"))
 
-    async def handle_ping(self, msg: Message) -> None:
+    async def handle_ping(self, task: Task) -> None:
         """Handles a ping message to check the server liveliness"""
-        await self.send(msg.respond(Command.PING, {"time": time.time(), "tasks": len(self.tasks)}))
+        task.start()
+        await self.send(task.message.respond(Command.PING, {"time": time.time(), "tasks": len(self.tasks)}))
 
 
 @click.command()

@@ -321,3 +321,5 @@ async def test_server_heartbeat(
         assert responses[Command.RUN].args["returncode"] == 2
         assert Command.QUIT in responses
         assert Command.HEARTBEAT in responses
+
+        assert responses[Command.HEARTBEAT].args["state"] == "STARTED"

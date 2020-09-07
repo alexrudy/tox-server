@@ -5,4 +5,4 @@ from .cli import main
 
 __all__ = ["server", "client", "cli", "main"]
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"

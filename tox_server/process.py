@@ -77,32 +77,32 @@ async def tox_command(
     assert proc.stdout is not None, "Expected to get a STDOUT stream from asyncio"
     assert proc.stderr is not None, "Expected to get a STDERR stream from asyncio"
 
-    log.debug(f"Launching output tasks")
+    log.debug("Launching output tasks")
 
     output_tasks = {
         asyncio.create_task(publish_output(proc.stdout, output, message, Stream.STDOUT, tee=tee)),
         asyncio.create_task(publish_output(proc.stderr, output, message, Stream.STDERR, tee=tee)),
     }
 
-    log.debug(f"Waiting for subprocess")
+    log.debug("Waiting for subprocess")
 
     try:
         returncode = await proc.wait()
     except asyncio.CancelledError:
-        log.debug(f"Cancelling subprocess")
+        log.debug("Cancelling subprocess")
         proc.terminate()
         returncode = await proc.wait()
     except Exception:  # pragma: nocover
         log.exception("Exception in proc.wait")
         raise
     finally:
-        log.debug(f"Cleaning up")
+        log.debug("Cleaning up")
         for task in output_tasks:
             task.cancel()
 
         await asyncio.wait(output_tasks)
 
-    log.info(f"command done")
+    log.info("command done")
 
     return subprocess.CompletedProcess(args, returncode=returncode)
 

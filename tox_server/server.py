@@ -3,8 +3,8 @@ import contextlib
 import dataclasses as dc
 import enum
 import logging
-import signal
 import os
+import signal
 import sys
 import time
 from typing import Dict

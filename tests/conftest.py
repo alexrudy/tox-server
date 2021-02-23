@@ -2,6 +2,7 @@ import asyncio
 import logging
 from typing import Any
 from typing import AsyncIterator
+from typing import Iterator
 from typing import List
 
 import pytest
@@ -27,7 +28,7 @@ def pytest_collection_modifyitems(items: List[Item]) -> None:
 
 
 @pytest.fixture()
-def zctx() -> zmq.asyncio.Context:
+def zctx() -> Iterator[zmq.asyncio.Context]:
 
     context = zmq.asyncio.Context()
     yield context

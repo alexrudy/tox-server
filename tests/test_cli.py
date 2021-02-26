@@ -45,7 +45,7 @@ def click_in_process(
             if check_output:
                 assert check_output in result.output
         else:
-            raise ValueError("No result recieved from command {args!r}")
+            raise ValueError(f"No result recieved from command {args!r}")
 
         proc.join(timeout)
     finally:
@@ -214,7 +214,7 @@ async def test_cli_cancel(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> No
     with server, click_in_process(args, exit_code=0, timeout=0.2) as proc:
         assert proc.pid is not None
 
-        # We get the quit message, but we won't
+        # We get the message, but we won't
         # respond. This just indicates that the CLI is running.
         msg = await Message.recv(server)
         log.debug(repr(msg))
@@ -236,7 +236,7 @@ async def test_cli_argparse(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> 
     with server, click_in_process(args, exit_code=0) as proc:
         assert proc.pid is not None
 
-        # We get the quit message, but we won't
+        # We get the message, but we won't
         # respond. This just indicates that the CLI is running.
         msg = await Message.recv(server)
         log.debug(repr(msg))
@@ -261,7 +261,7 @@ async def test_cli_slow_message(unused_tcp_port: int, zctx: zmq.asyncio.Context)
     with server, click_in_process(args, exit_code=0, check_output="Command RUN is queued") as proc:
         assert proc.pid is not None
 
-        # We get the quit message, but we won't
+        # We get the message, but we won't
         # respond. This just indicates that the CLI is running.
         msg = await Message.recv(server)
         log.debug(repr(msg))
@@ -272,6 +272,63 @@ async def test_cli_slow_message(unused_tcp_port: int, zctx: zmq.asyncio.Context)
         await heartbeat.send(server)
 
         response = msg.respond(command=Command.RUN, args={"returncode": 0, "args": msg.args["tox"]})
+        await response.send(server)
+
+        # The context manager will now assert that we got
+        # exit_code == 0, which indicates a successful exit.
+
+
+@mark_asyncio_timeout(1)
+async def test_cli_no_state(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> None:
+    args = [f"-p{unused_tcp_port:d}", "-hlocalhost", "-ldebug", "run", "--foo", "--", "--arg-here"]
+
+    server = zctx.socket(zmq.ROUTER)
+    server.setsockopt(zmq.LINGER, 0)
+    server.bind(f"tcp://127.0.0.1:{unused_tcp_port:d}")
+
+    with server, click_in_process(args, exit_code=1) as proc:
+        assert proc.pid is not None
+
+        # We get the message, but we won't
+        # respond. This just indicates that the CLI is running.
+        msg = await Message.recv(server)
+        log.debug(repr(msg))
+
+        assert msg.args["tox"] == ["--foo", "--", "--arg-here"]
+
+        heartbeat = msg.respond(command=Command.HEARTBEAT, args={})
+        await heartbeat.send(server)
+
+        response = msg.respond(command=Command.RUN, args={"returncode": 0, "args": msg.args["tox"]})
+        await response.send(server)
+
+        # The context manager will now assert that we got
+        # exit_code == 0, which indicates a successful exit.
+
+
+@mark_asyncio_timeout(1)
+async def test_cli_old_protocol(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> None:
+    args = [f"-p{unused_tcp_port:d}", "-hlocalhost", "-ldebug", "run", "--foo", "--", "--arg-here"]
+
+    server = zctx.socket(zmq.ROUTER)
+    server.setsockopt(zmq.LINGER, 0)
+    server.bind(f"tcp://127.0.0.1:{unused_tcp_port:d}")
+
+    with server, click_in_process(args, exit_code=0) as proc:
+        assert proc.pid is not None
+
+        # We get the message, but we won't
+        # respond. This just indicates that the CLI is running.
+        msg = await Message.recv(server)
+        log.debug(repr(msg))
+
+        assert msg.args["tox"] == ["--foo", "--", "--arg-here"]
+
+        heartbeat = msg.respond(command=Command.HEARTBEAT, args={})
+        await heartbeat.send(server, version=None)
+
+        response = msg.respond(command=Command.RUN, args={"returncode": 0, "args": msg.args["tox"]})
+
         await response.send(server)
 
         # The context manager will now assert that we got

@@ -91,8 +91,10 @@ async def client(
                 has_printed_output = True
                 Stream[response.args["stream"]].fwrite(base64.b85decode(response.args["data"]))
             elif response.command == Command.HEARTBEAT:
-                # Ensures that we don't timeout above.
-                state = response.args["state"]
+                if response.version < 1:
+                    pass
+                else:
+                    state = response.args["state"]
             else:
                 # Note: this assumes that OUTPUT is the only command which shouldn't end
                 # the await loop above, which might not be true...

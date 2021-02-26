@@ -42,3 +42,12 @@ class TestMessage:
         msg = Message.parse([data])
         assert not msg.identifiers
         assert msg.identifier == (b"",)
+
+    def test_version(self) -> None:
+        data = json.dumps({"command": "PING", "args": None, "version": 4}).encode("utf-8")
+        msg = Message.parse([data])
+        assert msg.version == 4
+
+        data = json.dumps({"command": "PING", "args": None}).encode("utf-8")
+        msg = Message.parse([data])
+        assert msg.version == 0

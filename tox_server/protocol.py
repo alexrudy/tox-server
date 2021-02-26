@@ -13,6 +13,11 @@ from .exc import TSException
 __all__ = ["Command", "Message", "ProtocolError", "ProtocolFailure"]
 
 
+PROTOCOL_VERSION = 1
+#: Used to idnetify which server version was involved, and gate
+#: features between the server and client. Version 0 is implicit.
+
+
 class Command(enum.Enum):
     """Intended effect of a command sent via ZMQ"""
 
@@ -57,6 +62,9 @@ class Message:
     timeout: Optional[float] = None
     #: Optional timeout, indicateds heartbeat period
 
+    version: int = 0
+    #: Protocol version
+
     @classmethod
     def parse(cls, message: List[bytes]) -> "Message":
         """Parse a list of ZMQ message frames
@@ -98,16 +106,23 @@ class Message:
         if not isinstance(timeout, (float, type(None))):
             timeout = None
 
+        version = mdata.get("version", 0)
+
         try:
             command = Command[command]
         except KeyError:
             raise ProtocolError.from_message(message=f"Unknown command: {command}", identifiers=tuple(identifiers))
 
-        return cls(command=command, args=args, identifiers=tuple(identifiers), timeout=timeout)
+        return cls(command=command, args=args, identifiers=tuple(identifiers), timeout=timeout, version=version)
 
-    def assemble(self) -> List[bytes]:
+    def assemble(self, version: Optional[int] = PROTOCOL_VERSION) -> List[bytes]:
         """Assemble this message for sending"""
-        message = json.dumps({"command": self.command.name, "args": self.args, "timeout": self.timeout}).encode("utf-8")
+        data = {"command": self.command.name, "args": self.args, "timeout": self.timeout}
+
+        if version is not None:
+            data["version"] = version
+
+        message = json.dumps(data).encode("utf-8")
         if self.identifiers:
             return list(self.identifiers) + [message]
         return [message]
@@ -132,9 +147,9 @@ class Message:
         data = await socket.recv_multipart(flags=flags)
         return cls.parse(data)
 
-    async def send(self, socket: zmq.asyncio.Socket, flags: int = 0) -> None:
+    async def send(self, socket: zmq.asyncio.Socket, flags: int = 0, version: Optional[int] = PROTOCOL_VERSION) -> None:
         """Send a message on the provided socket"""
-        await socket.send_multipart(self.assemble(), flags=flags)
+        await socket.send_multipart(self.assemble(version=version), flags=flags)
 
     def for_dealer(self) -> "Message":
         return dc.replace(self, identifiers=tuple([b""] + list(self.identifiers or [])))

@@ -4,6 +4,7 @@ from typing import Optional
 
 import click
 
+from .__about__ import __version__
 from .client import init_click_group as init_client_commands
 from .server import serve
 
@@ -58,6 +59,7 @@ class LogLevelParamType(click.ParamType):
     help="Set logging level",
     default=logging.WARNING,
 )
+@click.version_option(version=__version__)
 @click.pass_context
 def main(ctx: click.Context, host: str, port: int, bind_host: str, timeout: Optional[float], log_level: int) -> None:
     """Interact with a tox server."""

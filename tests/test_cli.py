@@ -324,3 +324,12 @@ def test_cli_loglevel() -> None:
 
     result = runner.invoke(cmd, ["--level", "foo"])
     assert result.exit_code == 2
+
+
+def test_cli_version() -> None:
+
+    runner = click.testing.CliRunner()
+
+    result = runner.invoke(cli.main, "--version")
+    assert result.exit_code == 0
+    assert "version" in result.output

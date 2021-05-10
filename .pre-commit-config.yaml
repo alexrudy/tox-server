@@ -1,6 +1,6 @@
 repos:
 -   repo: https://github.com/psf/black
-    rev: 21.4b2
+    rev: 21.5b1
     hooks:
     -   id: black
         args: [--safe, --quiet, -l120]
@@ -28,7 +28,7 @@ repos:
     -   id: debug-statements
         language_version: python3
 -   repo: https://github.com/PyCQA/flake8
-    rev: 3.9.1
+    rev: 3.9.2
     hooks:
     -   id: flake8
         language_version: python3
@@ -38,7 +38,7 @@ repos:
     -   id: reorder-python-imports
         args: [--py3-plus, '--application-directories=.:src']
 -   repo: https://github.com/asottile/pyupgrade
-    rev: v2.14.0
+    rev: v2.15.0
     hooks:
     -   id: pyupgrade
         args: [--py3-plus, --keep-mock]

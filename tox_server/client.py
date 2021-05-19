@@ -107,7 +107,7 @@ async def client(
     return response
 
 
-def command_name() -> str:
+def command_name() -> Optional[str]:
     return click.get_current_context().command.name
 
 
@@ -143,7 +143,7 @@ def run(ctx: click.Context) -> None:
     All arguments are forwarded to `tox` on the host machine.
     """
     tox_args = unparse_arguments(tuple(ctx.args))
-    cfg = ctx.find_object(dict)
+    cfg = ctx.ensure_object(dict)
 
     message = Message(command=Command.RUN, args={"tox": tox_args}, timeout=cfg["timeout"])
     response = run_client(cfg["uri"], message, timeout=cfg["timeout"])
@@ -164,7 +164,7 @@ def quit(ctx: click.Context) -> None:
     """
     Quit the server.
     """
-    cfg = ctx.find_object(dict)
+    cfg = ctx.ensure_object(dict)
 
     message = Message(command=Command.QUIT, args=None)
     response = run_client(cfg["uri"], message, timeout=cfg["timeout"])
@@ -178,7 +178,7 @@ def cancel(ctx: click.Context, command: str) -> None:
     """
     Cancel all commands of a particular flavor on the server.
     """
-    cfg = ctx.find_object(dict)
+    cfg = ctx.ensure_object(dict)
 
     message = Message(command=Command.CANCEL, args={"command": command.upper()})
     response = run_client(cfg["uri"], message, timeout=cfg["timeout"])
@@ -191,7 +191,7 @@ def ping(ctx: click.Context) -> None:
     """
     Ping the server, to check if it is alive.
     """
-    cfg = ctx.find_object(dict)
+    cfg = ctx.ensure_object(dict)
     message = Message(command=Command.PING, args=None)
     response = run_client(cfg["uri"], message, timeout=cfg["timeout"])
     click.echo(response.args)

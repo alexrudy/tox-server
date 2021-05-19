@@ -336,7 +336,7 @@ def serve(ctx: click.Context, tee: bool = True) -> None:
 
     The server runs indefinitely until it recieves a quit command or a sigint
     """
-    cfg = ctx.find_object(dict)
+    cfg = ctx.ensure_object(dict)
 
     try:
         server = Server(cfg["bind"], tee=tee)

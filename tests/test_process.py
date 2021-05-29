@@ -54,7 +54,7 @@ def mock_stream() -> asyncio.StreamReader:
         nonlocal reads
         return reads == 0
 
-    stream = mock.AsyncMock(asyncio.StreamReader)  # type: ignore
+    stream = mock.AsyncMock(asyncio.StreamReader)
     stream.read.side_effect = read
     stream.at_eof.side_effect = at_eof
     return stream

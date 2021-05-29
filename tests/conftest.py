@@ -68,8 +68,8 @@ async def process(monkeypatch: Any, event_loop: Any) -> SubprocessManager:
         if not returncode.done():
             returncode.set_result(-1)
 
-    css = mock.AsyncMock()  # type: ignore
-    css.return_value = proc = mock.AsyncMock(spec=asyncio.subprocess.Process)  # type: ignore
+    css = mock.AsyncMock()
+    css.return_value = proc = mock.AsyncMock(spec=asyncio.subprocess.Process)
     proc.stdout = mock.Mock()
     proc.stderr = mock.Mock()
     proc.wait.side_effect = proc_wait

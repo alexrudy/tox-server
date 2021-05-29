@@ -5,6 +5,7 @@ import logging
 import signal
 import subprocess
 import sys
+import time
 from typing import Optional
 from typing import Tuple
 
@@ -17,6 +18,7 @@ from .protocol import Command
 from .protocol import Message
 
 log = logging.getLogger(__name__)
+DEFAULT_TIMEOUT_FOR_QUEUE_NOTIFICATION = 2.0
 
 
 def unparse_arguments(args: Tuple[str, ...]) -> Tuple[str, ...]:
@@ -51,7 +53,11 @@ async def send_interrupt(socket: zmq.asyncio.Socket, message: Message) -> None:
 
 
 async def client(
-    uri: str, message: Message, timeout: Optional[float] = None, zctx: Optional[zmq.asyncio.Context] = None
+    uri: str,
+    message: Message,
+    timeout: Optional[float] = None,
+    zctx: Optional[zmq.asyncio.Context] = None,
+    timeout_for_queue_notification: float = DEFAULT_TIMEOUT_FOR_QUEUE_NOTIFICATION,
 ) -> Message:
     """Manage client connection to tox-server
 
@@ -80,7 +86,7 @@ async def client(
 
     state = "QUEUED"
     has_printed_output = False
-
+    queued_deadline = time.time() + timeout_for_queue_notification
     with interrupt_handler(signal.SIGINT, sigint_callback, oneshot=True), client:
 
         await message.for_dealer().send(client)
@@ -100,7 +106,8 @@ async def client(
                 # the await loop above, which might not be true...
                 break
 
-            if not has_printed_output and state == "QUEUED":
+            now = time.time()
+            if not has_printed_output and state == "QUEUED" and queued_deadline <= now:
                 has_printed_output = True
                 click.echo(f"Command {message.command.name} is queued")
 
@@ -111,10 +118,18 @@ def command_name() -> Optional[str]:
     return click.get_current_context().command.name
 
 
-def run_client(uri: str, message: Message, timeout: Optional[float] = None) -> Message:
+def run_client(
+    uri: str,
+    message: Message,
+    timeout: Optional[float] = None,
+    timeout_for_queue_notification: float = DEFAULT_TIMEOUT_FOR_QUEUE_NOTIFICATION,
+) -> Message:
     """Wrapper function to run a client from a CLI"""
     try:
-        response = asyncio.run(client(uri, message, timeout=timeout), debug=True)
+        response = asyncio.run(
+            client(uri, message, timeout=timeout, timeout_for_queue_notification=timeout_for_queue_notification),
+            debug=True,
+        )
     except asyncio.TimeoutError:
         click.echo(f"Command {command_name()} timed out!", err=True)
         raise SystemExit(2)
@@ -146,7 +161,12 @@ def run(ctx: click.Context) -> None:
     cfg = ctx.ensure_object(dict)
 
     message = Message(command=Command.RUN, args={"tox": tox_args}, timeout=cfg["timeout"])
-    response = run_client(cfg["uri"], message, timeout=cfg["timeout"])
+    response = run_client(
+        cfg["uri"],
+        message,
+        timeout=cfg["timeout"],
+        timeout_for_queue_notification=cfg["timeout_for_queue_notification"],
+    )
 
     proc: subprocess.CompletedProcess = subprocess.CompletedProcess(
         args=response.args["args"], returncode=response.args["returncode"]
@@ -167,7 +187,12 @@ def quit(ctx: click.Context) -> None:
     cfg = ctx.ensure_object(dict)
 
     message = Message(command=Command.QUIT, args=None)
-    response = run_client(cfg["uri"], message, timeout=cfg["timeout"])
+    response = run_client(
+        cfg["uri"],
+        message,
+        timeout=cfg["timeout"],
+        timeout_for_queue_notification=cfg["timeout_for_queue_notification"],
+    )
     click.echo(response.args)
 
 
@@ -181,7 +206,12 @@ def cancel(ctx: click.Context, command: str) -> None:
     cfg = ctx.ensure_object(dict)
 
     message = Message(command=Command.CANCEL, args={"command": command.upper()})
-    response = run_client(cfg["uri"], message, timeout=cfg["timeout"])
+    response = run_client(
+        cfg["uri"],
+        message,
+        timeout=cfg["timeout"],
+        timeout_for_queue_notification=cfg["timeout_for_queue_notification"],
+    )
     click.echo(response.args)
 
 
@@ -193,7 +223,12 @@ def ping(ctx: click.Context) -> None:
     """
     cfg = ctx.ensure_object(dict)
     message = Message(command=Command.PING, args=None)
-    response = run_client(cfg["uri"], message, timeout=cfg["timeout"])
+    response = run_client(
+        cfg["uri"],
+        message,
+        timeout=cfg["timeout"],
+        timeout_for_queue_notification=cfg["timeout_for_queue_notification"],
+    )
     click.echo(response.args)
 
 

@@ -5,7 +5,9 @@ import multiprocessing as mp
 import os
 import signal
 import sys
+import warnings
 from typing import Any
+from typing import Dict
 from typing import Iterator
 from typing import List
 from typing import Optional
@@ -21,29 +23,52 @@ from tox_server.protocol import Message
 log = logging.getLogger(__name__)
 
 
+@dc.dataclass
+class ProcessResult:
+    exit_code: int
+    output: str
+
+
+@dc.dataclass
+class ClickProcess:
+
+    proc: mp.Process
+
+    result: Optional[ProcessResult] = None
+
+    def finished(self) -> ProcessResult:
+        assert self.result is not None
+        return self.result
+
+    @property
+    def pid(self) -> Optional[int]:
+        return self.proc.pid
+
+    def is_alive(self) -> bool:
+        return self.proc.is_alive()
+
+    def join(self, timeout: Optional[float]) -> None:
+        if not timeout:
+            warnings.warn("proc.join() called without timeout")
+        self.proc.join(timeout=timeout)
+
+
 @contextlib.contextmanager
 def click_in_process(
-    args: List[str],
-    exit_code: int = 0,
-    timeout: float = 0.1,
-    check_exit_code: bool = True,
-    check_output: Optional[str] = None,
-) -> Iterator[mp.Process]:
+    args: List[str], timeout: float = 0.1, env: Optional[Dict[str, str]] = None
+) -> Iterator[ClickProcess]:
     (recv, send) = mp.Pipe()
     started = mp.Event()
-    proc = mp.Process(target=_click_process_target, args=(args, send, started), name="cli-process")
+    proc = mp.Process(target=_click_process_target, args=(args, send, started, env), name="cli-process")
     proc.start()
+    client = ClickProcess(proc=proc)
     try:
         started.wait(timeout)
 
-        yield proc
+        yield client
 
         if recv.poll(timeout):
-            result = recv.recv()
-            if check_exit_code:
-                assert result.exit_code == exit_code
-            if check_output:
-                assert check_output in result.output
+            client.result = recv.recv()
         else:
             raise ValueError(f"No result recieved from command {args!r}")
 
@@ -52,18 +77,12 @@ def click_in_process(
         proc.terminate()
 
 
-@dc.dataclass
-class ProcessResult:
-    exit_code: int
-    output: str
-
-
-def _click_process_target(args: List[str], chan: Any, event: Any) -> None:
+def _click_process_target(args: List[str], chan: Any, event: Any, env: Optional[Dict[str, str]] = None) -> None:
     try:
         runner = click.testing.CliRunner()
         event.set()
         sys.argv = [sys.argv[0]] + args
-        result = runner.invoke(cli.main, args=args)
+        result = runner.invoke(cli.main, args=args, env=env)
         chan.send(ProcessResult(result.exit_code, result.output))
     except BaseException as e:
         print(e)
@@ -73,15 +92,15 @@ def _click_process_target(args: List[str], chan: Any, event: Any) -> None:
 
 
 @contextlib.contextmanager
-def server_in_process(port: int, exit_code: int = 0, check_exit_code: bool = True) -> Iterator[mp.Process]:
+def server_in_process(port: int) -> Iterator[ClickProcess]:
     args = [f"-p{port:d}", "-b127.0.0.1", "serve"]
-    with click_in_process(args, exit_code=exit_code, check_exit_code=check_exit_code) as proc:
+    with click_in_process(args) as proc:
         yield proc
 
 
 def test_cli_quit(unused_tcp_port: int) -> None:
 
-    with server_in_process(unused_tcp_port):
+    with server_in_process(unused_tcp_port) as server:
 
         runner = click.testing.CliRunner()
         result = runner.invoke(cli.main, args=[f"-p{unused_tcp_port:d}", "-hlocalhost", "quit"])
@@ -89,10 +108,12 @@ def test_cli_quit(unused_tcp_port: int) -> None:
 
         assert "DONE" in result.output
 
+    assert server.finished().exit_code == 0
+
 
 def test_cli_ping(unused_tcp_port: int) -> None:
 
-    with server_in_process(unused_tcp_port):
+    with server_in_process(unused_tcp_port) as server:
 
         runner = click.testing.CliRunner()
         result = runner.invoke(cli.main, args=[f"-p{unused_tcp_port:d}", "-hlocalhost", "ping"])
@@ -102,10 +123,12 @@ def test_cli_ping(unused_tcp_port: int) -> None:
         result = runner.invoke(cli.main, args=[f"-p{unused_tcp_port:d}", "-hlocalhost", "quit"])
         assert result.exit_code == 0
 
+    assert server.finished().exit_code == 0
+
 
 def test_cli_run_help(unused_tcp_port: int) -> None:
 
-    with server_in_process(unused_tcp_port):
+    with server_in_process(unused_tcp_port) as server:
 
         runner = click.testing.CliRunner()
         result = runner.invoke(cli.main, args=[f"-p{unused_tcp_port:d}", "-hlocalhost", "run", "--", "--help"])
@@ -114,11 +137,12 @@ def test_cli_run_help(unused_tcp_port: int) -> None:
         runner = click.testing.CliRunner()
         result = runner.invoke(cli.main, args=[f"-p{unused_tcp_port:d}", "-hlocalhost", "quit"])
         assert result.exit_code == 0
+    assert server.finished().exit_code == 0
 
 
 def test_cli_run_unknown_argument(unused_tcp_port: int) -> None:
 
-    with server_in_process(unused_tcp_port):
+    with server_in_process(unused_tcp_port) as server:
 
         runner = click.testing.CliRunner()
         result = runner.invoke(cli.main, args=[f"-p{unused_tcp_port:d}", "-hlocalhost", "run", "--", "--foo"])
@@ -127,6 +151,7 @@ def test_cli_run_unknown_argument(unused_tcp_port: int) -> None:
         runner = click.testing.CliRunner()
         result = runner.invoke(cli.main, args=[f"-p{unused_tcp_port:d}", "-hlocalhost", "quit"])
         assert result.exit_code == 0
+    assert server.finished().exit_code == 0
 
 
 @mark_asyncio_timeout(2)
@@ -137,7 +162,7 @@ async def test_cli_interrupt(unused_tcp_port: int, zctx: zmq.asyncio.Context) ->
     server.setsockopt(zmq.LINGER, 0)
     server.bind(f"tcp://127.0.0.1:{unused_tcp_port:d}")
 
-    with server, click_in_process(args, exit_code=3) as proc:
+    with server, click_in_process(args) as proc:
         assert proc.pid is not None
 
         # We get the quit message, but we won't
@@ -159,6 +184,9 @@ async def test_cli_interrupt(unused_tcp_port: int, zctx: zmq.asyncio.Context) ->
         proc.join(0.1)
         assert not proc.is_alive()
 
+    result = proc.finished()
+    assert result.exit_code == 3
+
 
 @mark_asyncio_timeout(1)
 async def test_cli_timeout(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> None:
@@ -168,7 +196,7 @@ async def test_cli_timeout(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> N
     server.setsockopt(zmq.LINGER, 0)
     server.bind(f"tcp://127.0.0.1:{unused_tcp_port:d}")
 
-    with server, click_in_process(args, exit_code=2, timeout=0.2) as proc:
+    with server, click_in_process(args, timeout=0.2) as proc:
         assert proc.pid is not None
 
         # We get the quit message, but we won't
@@ -176,8 +204,8 @@ async def test_cli_timeout(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> N
         msg = await Message.recv(server)
         log.debug(repr(msg))
 
-        # The context manager will now assert that we got
-        # exit_code == 2, which indicates a timeout.
+    # exit_code == 2, which indicates a timeout.
+    assert proc.finished().exit_code == 2
 
 
 @mark_asyncio_timeout(1)
@@ -188,7 +216,7 @@ async def test_cli_error(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> Non
     server.setsockopt(zmq.LINGER, 0)
     server.bind(f"tcp://127.0.0.1:{unused_tcp_port:d}")
 
-    with server, click_in_process(args, exit_code=1) as proc:
+    with server, click_in_process(args) as proc:
         assert proc.pid is not None
 
         # We get the quit message, but we won't
@@ -199,8 +227,8 @@ async def test_cli_error(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> Non
         response = msg.respond(command=Command.ERR, args={"message": "An error occured"})
         await response.send(server)
 
-        # The context manager will now assert that we got
-        # exit_code == 1, which indicates a protocol error.
+    # exit_code == 1, which indicates a protocol error.
+    assert proc.finished().exit_code == 1
 
 
 @mark_asyncio_timeout(1)
@@ -211,7 +239,7 @@ async def test_cli_cancel(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> No
     server.setsockopt(zmq.LINGER, 0)
     server.bind(f"tcp://127.0.0.1:{unused_tcp_port:d}")
 
-    with server, click_in_process(args, exit_code=0, timeout=0.2) as proc:
+    with server, click_in_process(args, timeout=0.2) as proc:
         assert proc.pid is not None
 
         # We get the message, but we won't
@@ -221,8 +249,8 @@ async def test_cli_cancel(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> No
 
         await msg.respond(Command.CANCEL, args={"cancelled": 0}).send(server)
 
-        # The context manager will now assert that we got
-        # exit_code == 0, which indicates success.
+    # exit_code == 0, which indicates success.
+    assert proc.finished().exit_code == 0
 
 
 @mark_asyncio_timeout(1)
@@ -233,7 +261,7 @@ async def test_cli_argparse(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> 
     server.setsockopt(zmq.LINGER, 0)
     server.bind(f"tcp://127.0.0.1:{unused_tcp_port:d}")
 
-    with server, click_in_process(args, exit_code=0) as proc:
+    with server, click_in_process(args) as proc:
         assert proc.pid is not None
 
         # We get the message, but we won't
@@ -246,8 +274,8 @@ async def test_cli_argparse(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> 
         response = msg.respond(command=Command.RUN, args={"returncode": 0, "args": msg.args["tox"]})
         await response.send(server)
 
-        # The context manager will now assert that we got
-        # exit_code == 0, which indicates a successful exit.
+    # exit_code == 0, which indicates a successful exit.
+    assert proc.finished().exit_code == 0
 
 
 @mark_asyncio_timeout(1)
@@ -258,7 +286,9 @@ async def test_cli_slow_message(unused_tcp_port: int, zctx: zmq.asyncio.Context)
     server.setsockopt(zmq.LINGER, 0)
     server.bind(f"tcp://127.0.0.1:{unused_tcp_port:d}")
 
-    with server, click_in_process(args, exit_code=0, check_output="Command RUN is queued") as proc:
+    env = {"_TOX_SERVER_TIMEOUT_FOR_QUEUE_NOTIFICATION": "0.0"}
+
+    with server, click_in_process(args, env=env) as proc:
         assert proc.pid is not None
 
         # We get the message, but we won't
@@ -274,8 +304,9 @@ async def test_cli_slow_message(unused_tcp_port: int, zctx: zmq.asyncio.Context)
         response = msg.respond(command=Command.RUN, args={"returncode": 0, "args": msg.args["tox"]})
         await response.send(server)
 
-        # The context manager will now assert that we got
-        # exit_code == 0, which indicates a successful exit.
+    # exit_code == 0, which indicates a successful exit.
+    assert proc.finished().exit_code == 0
+    assert "Command RUN is queued" in proc.finished().output
 
 
 @mark_asyncio_timeout(1)
@@ -286,7 +317,7 @@ async def test_cli_no_state(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> 
     server.setsockopt(zmq.LINGER, 0)
     server.bind(f"tcp://127.0.0.1:{unused_tcp_port:d}")
 
-    with server, click_in_process(args, exit_code=1) as proc:
+    with server, click_in_process(args) as proc:
         assert proc.pid is not None
 
         # We get the message, but we won't
@@ -302,8 +333,8 @@ async def test_cli_no_state(unused_tcp_port: int, zctx: zmq.asyncio.Context) -> 
         response = msg.respond(command=Command.RUN, args={"returncode": 0, "args": msg.args["tox"]})
         await response.send(server)
 
-        # The context manager will now assert that we got
-        # exit_code == 0, which indicates a successful exit.
+    # exit_code == 1, which indicates a protocol error.
+    assert proc.finished().exit_code == 1
 
 
 @mark_asyncio_timeout(1)
@@ -314,7 +345,7 @@ async def test_cli_old_protocol(unused_tcp_port: int, zctx: zmq.asyncio.Context)
     server.setsockopt(zmq.LINGER, 0)
     server.bind(f"tcp://127.0.0.1:{unused_tcp_port:d}")
 
-    with server, click_in_process(args, exit_code=0) as proc:
+    with server, click_in_process(args) as proc:
         assert proc.pid is not None
 
         # We get the message, but we won't
@@ -331,14 +362,14 @@ async def test_cli_old_protocol(unused_tcp_port: int, zctx: zmq.asyncio.Context)
 
         await response.send(server)
 
-        # The context manager will now assert that we got
-        # exit_code == 0, which indicates a successful exit.
+    # exit_code == 0, which indicates a successful exit.
+    assert proc.finished().exit_code == 0
 
 
 def test_server_cli_interrupt(unused_tcp_port: int) -> None:
     """Test how the server process responds to interruptions"""
 
-    with server_in_process(unused_tcp_port, exit_code=0) as proc:
+    with server_in_process(unused_tcp_port) as proc:
         # Ensure we can roundtrip with the server before killing it.
         runner = click.testing.CliRunner()
         result = runner.invoke(cli.main, args=[f"-p{unused_tcp_port:d}", "-hlocalhost", "ping"])
@@ -347,11 +378,13 @@ def test_server_cli_interrupt(unused_tcp_port: int) -> None:
         assert proc.pid is not None
         os.kill(proc.pid, signal.SIGINT)
 
+    assert proc.finished().exit_code == 0
+
 
 def test_server_cli_term(unused_tcp_port: int) -> None:
     """Test how the server process responds to interruptions"""
 
-    with server_in_process(unused_tcp_port, exit_code=0) as proc:
+    with server_in_process(unused_tcp_port) as proc:
 
         # Ensure we can roundtrip with the server before killing it.
         runner = click.testing.CliRunner()
@@ -360,6 +393,8 @@ def test_server_cli_term(unused_tcp_port: int) -> None:
 
         assert proc.pid is not None
         os.kill(proc.pid, signal.SIGTERM)
+
+    assert proc.finished().exit_code == 0
 
 
 def test_cli_loglevel() -> None:

@@ -26,7 +26,7 @@ from tox_server.server import Server
 if sys.version_info < (3, 8):
     # On python 3.7 and earlier, the builtin mock doesn't support AsyncMock,
     # so we grab the backported version from pypi
-    import mock  # type: ignore  # noqa: F811,F401
+    import mock  # noqa: F811,F401
 
 log = logging.getLogger("tox_server.tests")
 

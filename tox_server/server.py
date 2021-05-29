@@ -200,7 +200,9 @@ class Server:
             while not self.shutdown_event.is_set():
                 try:
                     period = await task.beat(self.socket)
-                    await asyncio.wait((self.shutdown_event.wait(),), timeout=period)
+                    await asyncio.wait_for(asyncio.shield(self.shutdown_event.wait()), timeout=period)
+                except asyncio.TimeoutError:
+                    pass
                 except Exception:
                     log.exception("Heartbeat exception")
                     raise

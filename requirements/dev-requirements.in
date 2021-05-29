@@ -5,4 +5,6 @@ tox
 coverage
 invoke
 pip-tools
+flake8
+black
 -r test-requirements.txt

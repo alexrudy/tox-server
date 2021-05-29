@@ -15,9 +15,9 @@ def lock(c, sync=True):
 @task(name="sync")
 def sync_requirements(c, dev=False):
     """Install dependencies"""
-    dev_requirements = "requirements/dev-requirements.txt" if dev else ""
+    requirements = "requirements/dev-requirements.txt" if dev else "requirements/test-requirements.txt"
 
-    c.run(f"pip-sync requirements/test-requirements.txt {dev_requirements}")
+    c.run(f"pip-sync {requirements}")
     c.run("pip install -e .")
 
 

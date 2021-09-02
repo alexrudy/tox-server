@@ -3,7 +3,9 @@ import contextlib
 import dataclasses as dc
 import enum
 import logging
+import os
 import signal
+import sys
 import time
 from typing import Dict
 from typing import Generator
@@ -97,11 +99,12 @@ class Server:
         self.uri = uri
         self.tee = tee
         self.zctx = zctx or zmq.asyncio.Context()
+        self.restart = False
 
         self.tasks: Dict[TaskID, Task] = {}
         self._timeout = 0.1
 
-    async def serve_forever(self) -> None:
+    async def serve_forever(self) -> bool:
         """Start the server, and ensure it runs until this coroutine is cancelled
 
         To cancel the server, start this method as a task, then cancel the task::
@@ -118,6 +121,7 @@ class Server:
 
         # Event used to indicate that the server should finish gracefully.
         self.shutdown_event = asyncio.Event()
+        self.restart = False
 
         # The lock is used to ensure that only a single tox subprocess
         # can run at any given time.
@@ -147,6 +151,7 @@ class Server:
             self._processor.cancel()
             self.socket.close()
         log.debug("Server is done.")
+        return self.restart
 
     async def shutdown(self) -> None:
         """Shutdown this server, cancelling processing tasks"""
@@ -313,6 +318,16 @@ class Server:
             result = await tox_command(task.message.args["tox"], self.socket, task.message, tee=self.tee)
         await self.send(task.message.respond(Command.RUN, {"returncode": result.returncode, "args": result.args}))
 
+    async def handle_restart(self, task: Task) -> None:
+        """Handles a quit message to gracefully shut down.
+
+        Quit starts a graceful shutdown process for the server.
+        """
+        self.shutdown_event.set()
+        self.restart = True
+        log.debug("Requesting restart")
+        await self.send(task.message.respond(Command.RESTART, "DONE"))
+
     async def handle_quit(self, task: Task) -> None:
         """Handles a quit message to gracefully shut down.
 
@@ -342,7 +357,16 @@ def serve(ctx: click.Context, tee: bool = True) -> None:
 
     try:
         server = Server(cfg["bind"], tee=tee)
-        asyncio.run(server.serve_forever())
+        do_restart = asyncio.run(server.serve_forever())
     except BaseException:
         log.exception("Exception in server")
         raise
+
+    if do_restart:
+        log.info("Restarting server")
+        restart_process()
+
+
+def restart_process() -> None:
+    python = sys.executable
+    os.execl(python, python, *sys.argv)

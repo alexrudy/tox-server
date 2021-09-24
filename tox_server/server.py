@@ -342,7 +342,7 @@ def serve(ctx: click.Context, tee: bool = True) -> None:
 
     try:
         server = Server(cfg["bind"], tee=tee)
-        asyncio.run(server.serve_forever())
+        asyncio.run(server.serve_forever(), debug=cfg.get("debug", False))
     except BaseException:
         log.exception("Exception in server")
         raise

@@ -7,7 +7,8 @@ import signal
 import subprocess
 import sys
 import time
-from typing import Iterator, Optional
+from typing import Iterator
+from typing import Optional
 from typing import Tuple
 
 import click

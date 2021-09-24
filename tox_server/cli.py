@@ -70,7 +70,7 @@ def main(ctx: click.Context, host: str, port: int, bind_host: str, timeout: Opti
     cfg["bind"] = f"tcp://{bind_host}:{port:d}"
     cfg["timeout"] = timeout
     cfg["timeout_for_queue_notification"] = float(os.environ.get("_TOX_SERVER_TIMEOUT_FOR_QUEUE_NOTIFICATION", "2.0"))
-    logging.basicConfig(format=f"[{ctx.invoked_subcommand}] %(message)s", level=log_level)
+    logging.basicConfig(format=f"[{ctx.invoked_subcommand}] %(message)s", level=log_level, force=True)
 
 
 init_client_commands(main)

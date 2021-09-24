@@ -185,6 +185,7 @@ async def test_cli_interrupt(unused_tcp_port: int, zctx: zmq.asyncio.Context) ->
         assert not proc.is_alive()
 
     result = proc.finished()
+    print(result.output)
     assert result.exit_code == 3
 
 

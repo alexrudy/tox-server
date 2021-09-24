@@ -1,11 +1,13 @@
 import asyncio
 import base64
+import contextlib
 import functools
 import logging
 import signal
 import subprocess
 import sys
 import time
+from typing import Iterator
 from typing import Optional
 from typing import Tuple
 
@@ -118,18 +120,39 @@ def command_name() -> Optional[str]:
     return click.get_current_context().command.name
 
 
+@contextlib.contextmanager
+def asyncio_py397_context() -> Iterator[None]:
+    """
+    Hotfix for https://bugs.python.org/issue45097
+
+    The deprecation warning about the loop parameter is raised regardless of whether the user
+    caused it in a few places.
+    """
+    try:
+        yield
+    except DeprecationWarning as warning:
+        if str(warning).startswith("The loop argument is deprecated since Python 3.8"):
+            if warning.__context__:
+                raise warning.__context__ from None
+        else:
+            raise warning
+
+
 def run_client(
     uri: str,
     message: Message,
     timeout: Optional[float] = None,
     timeout_for_queue_notification: float = DEFAULT_TIMEOUT_FOR_QUEUE_NOTIFICATION,
+    debug: bool = False,
 ) -> Message:
     """Wrapper function to run a client from a CLI"""
     try:
-        response = asyncio.run(
-            client(uri, message, timeout=timeout, timeout_for_queue_notification=timeout_for_queue_notification),
-            debug=True,
-        )
+        with asyncio_py397_context():
+            response = asyncio.run(
+                client(uri, message, timeout=timeout, timeout_for_queue_notification=timeout_for_queue_notification),
+                debug=debug,
+            )
+
     except asyncio.TimeoutError:
         click.echo(f"Command {command_name()} timed out!", err=True)
         raise SystemExit(2)
@@ -137,6 +160,7 @@ def run_client(
         click.echo("", err=True)
         click.echo(f"Command {command_name()} interrupted!", err=True)
         raise SystemExit(3)
+
     except BaseException:
         log.exception("Unhandled exception in asyncio loop")
         raise
@@ -166,6 +190,7 @@ def run(ctx: click.Context) -> None:
         message,
         timeout=cfg["timeout"],
         timeout_for_queue_notification=cfg["timeout_for_queue_notification"],
+        debug=cfg.get("debug", False),
     )
 
     proc: subprocess.CompletedProcess = subprocess.CompletedProcess(

@@ -73,7 +73,7 @@ async def test_send_output(tee: bool, mock_stream: asyncio.StreamReader, zctx: z
     message = Message(command=Command.RUN, args=None)
     task = asyncio.create_task(publish_output(mock_stream, sender, message, Stream.STDOUT, tee=tee))
 
-    msg = await reciever.recv_json()
+    msg = await reciever.recv_json()  # type: ignore
 
     assert base64.b85decode(msg["args"]["data"].encode("ascii")) == b"hello"
 

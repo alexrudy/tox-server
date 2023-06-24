@@ -17,7 +17,6 @@ import pytest
 import zmq.asyncio
 
 import tox_server as ts
-import tox_server.process
 from tox_server.protocol import Command
 from tox_server.protocol import Message
 from tox_server.server import Server
@@ -80,8 +79,8 @@ T = TypeVar("T")
 
 
 @contextlib.asynccontextmanager
-async def run_task(aw: Coroutine[Any, Any, T]) -> AsyncIterator[asyncio.Future[T]]:
-    task: asyncio.Task[T] = asyncio.create_task(aw)
+async def run_task(aw: "Coroutine[Any, Any, T]") -> "AsyncIterator[asyncio.Future[T]]":
+    task: "asyncio.Task[T]" = asyncio.create_task(aw)
     try:
         yield task
     finally:

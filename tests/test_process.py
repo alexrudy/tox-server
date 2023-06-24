@@ -21,7 +21,6 @@ log = logging.getLogger(__name__)
 
 @pytest.mark.parametrize("stream", [Stream.STDERR, Stream.STDOUT])
 def test_local_streams(stream: Stream) -> None:
-
     assert hasattr(stream._get_stream(), "write")
     assert hasattr(stream._get_stream(), "flush")
 
@@ -63,7 +62,6 @@ def mock_stream() -> asyncio.StreamReader:
 @mark_asyncio_timeout(1)
 @pytest.mark.parametrize("tee", [True, False])
 async def test_send_output(tee: bool, mock_stream: asyncio.StreamReader, zctx: zmq.asyncio.Context) -> None:
-
     sender = zctx.socket(zmq.PAIR)
     sender.bind("inproc://test-send-output")
 
@@ -88,7 +86,6 @@ async def test_run_command(process: SubprocessManager, mock_publisher: zmq.async
     msg = Message(command=Command.RUN, args=None)
 
     async with run_task(tox_command(["foo"], mock_publisher, msg)) as task:
-
         await asyncio.wait((task,), timeout=0.2)
 
         log.debug(f"Cancelling tox future {task!r}")

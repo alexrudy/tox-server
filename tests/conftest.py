@@ -6,6 +6,7 @@ from typing import Iterator
 from typing import List
 
 import pytest
+import pytest_asyncio
 import zmq.asyncio
 from pytest import Item
 from pytest_mypy import MypyFileItem
@@ -29,7 +30,6 @@ def pytest_collection_modifyitems(items: List[Item]) -> None:
 
 @pytest.fixture()
 def zctx() -> Iterator[zmq.asyncio.Context]:
-
     context = zmq.asyncio.Context()
     yield context
     context.destroy(linger=0)
@@ -49,9 +49,8 @@ def uri(protocol: str, unused_tcp_port: int) -> URI:
     raise ValueError(protocol)
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def process(monkeypatch: Any, event_loop: Any) -> SubprocessManager:
-
     returncode: asyncio.Future = event_loop.create_future()
     state = SubprocessState(hang=False, returncode=returncode)
 
@@ -78,7 +77,7 @@ async def process(monkeypatch: Any, event_loop: Any) -> SubprocessManager:
     return SubprocessManager(proc, css, state)
 
 
-@pytest.fixture
+@pytest_asyncio.fixture
 async def server(process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context) -> AsyncIterator[asyncio.Future]:
     async with run_server(uri.bind, zctx) as server_task:
         yield server_task

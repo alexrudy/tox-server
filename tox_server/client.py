@@ -90,7 +90,6 @@ async def client(
     has_printed_output = False
     queued_deadline = time.time() + timeout_for_queue_notification
     with interrupt_handler(signal.SIGINT, sigint_callback, oneshot=True), client:
-
         await message.for_dealer().send(client)
 
         while True:

@@ -7,4 +7,4 @@ invoke
 pip-tools
 flake8
 black
--r test-requirements.txt
+-r test-requirements.in

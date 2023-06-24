@@ -42,12 +42,9 @@ async def test_serve(
 
 @mark_asyncio_timeout(1)
 async def test_server_run(process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context) -> None:
-
     async with run_server(uri.bind, zctx) as server_task:
-
         msg = Message(command=Command.RUN, args={"tox": []})
         async with run_task(client(uri.connect, msg, zctx=zctx)) as client_task:
-
             process.returncode.set_result(0)
 
             (done, pending) = await asyncio.wait(
@@ -64,7 +61,6 @@ async def test_server_run(process: SubprocessManager, uri: URI, zctx: zmq.asynci
 async def test_server_interrupt(
     server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
 ) -> None:
-
     with zctx.socket(zmq.DEALER) as socket:
         socket.connect(uri.connect)
         msg = Message(command=Command.RUN, args={"tox": []})
@@ -84,7 +80,6 @@ async def test_server_interrupt(
 async def test_server_cancel_hang(
     server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
 ) -> None:
-
     process.state.hang = True
     with zctx.socket(zmq.DEALER) as socket:
         socket.connect(uri.connect)
@@ -116,7 +111,6 @@ async def test_server_cancel_hang(
 async def test_server_interrupt_hang(
     server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
 ) -> None:
-
     process.state.hang = True
     with zctx.socket(zmq.DEALER) as socket:
         socket.connect(uri.connect)
@@ -140,7 +134,6 @@ async def test_server_interrupt_hang(
 async def test_server_cancel_wrong_command(
     server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
 ) -> None:
-
     process.state.hang = True
     with zctx.socket(zmq.DEALER) as socket:
         socket.connect(uri.connect)
@@ -163,7 +156,6 @@ async def test_server_cancel_wrong_command(
 async def test_server_interrupt_wrong_command(
     server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
 ) -> None:
-
     process.state.hang = True
     with zctx.socket(zmq.DEALER) as socket:
         socket.connect(uri.connect)
@@ -186,7 +178,6 @@ async def test_server_interrupt_wrong_command(
 async def test_server_interrupt_finished_task(
     server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
 ) -> None:
-
     with zctx.socket(zmq.DEALER) as socket:
         socket.connect(uri.connect)
         msg = Message(command=Command.RUN, args={"tox": []})
@@ -209,7 +200,6 @@ async def test_server_interrupt_finished_task(
 async def test_server_repeat_task(
     server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
 ) -> None:
-
     with zctx.socket(zmq.DEALER) as socket:
         socket.connect(uri.connect)
 
@@ -237,7 +227,6 @@ async def test_server_repeat_task(
 async def test_server_interrupt_unknown_task(
     server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
 ) -> None:
-
     with zctx.socket(zmq.DEALER) as socket:
         socket.connect(uri.connect)
 
@@ -254,7 +243,6 @@ async def test_server_interrupt_unknown_task(
 async def test_server_protocol_error(
     server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
 ) -> None:
-
     with zctx.socket(zmq.DEALER) as socket:
         socket.connect(uri.connect)
 
@@ -271,7 +259,6 @@ async def test_server_protocol_error(
 async def test_server_quit_and_drain(
     server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
 ) -> None:
-
     with zctx.socket(zmq.DEALER) as socket:
         socket.connect(uri.connect)
 
@@ -296,7 +283,6 @@ async def test_server_quit_and_drain(
 async def test_server_heartbeat(
     server: asyncio.Future, process: SubprocessManager, uri: URI, zctx: zmq.asyncio.Context
 ) -> None:
-
     with zctx.socket(zmq.DEALER) as socket:
         socket.connect(uri.connect)
 

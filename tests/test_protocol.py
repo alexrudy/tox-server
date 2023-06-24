@@ -9,12 +9,10 @@ from tox_server.protocol import ProtocolFailure
 
 class TestMessage:
     def test_parse_empty(self) -> None:
-
         with pytest.raises(ProtocolFailure):
             Message.parse([])
 
     def test_parse_invalid_identifiers(self) -> None:
-
         with pytest.raises(ProtocolFailure):
             Message.parse([b"identifier", b"data"])
 
@@ -23,7 +21,6 @@ class TestMessage:
             Message.parse([b"identifier", b"", b"{data"])
 
     def test_parse_missing_args(self) -> None:
-
         data = json.dumps({"command": "BAZ"}).encode("utf-8")
         with pytest.raises(ProtocolError) as exc_info:
             Message.parse([b"identifier", b"", data])

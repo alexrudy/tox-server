@@ -37,7 +37,6 @@ TaskID = Tuple[Command, Tuple[bytes, ...]]
 
 @dc.dataclass(init=False)
 class Task:
-
     message: Message
     action: asyncio.Future
     heartbeat: asyncio.Future

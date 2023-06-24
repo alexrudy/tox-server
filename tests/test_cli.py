@@ -31,7 +31,6 @@ class ProcessResult:
 
 @dc.dataclass
 class ClickProcess:
-
     proc: mp.Process
 
     result: Optional[ProcessResult] = None
@@ -99,9 +98,7 @@ def server_in_process(port: int) -> Iterator[ClickProcess]:
 
 
 def test_cli_quit(unused_tcp_port: int) -> None:
-
     with server_in_process(unused_tcp_port) as server:
-
         runner = click.testing.CliRunner()
         result = runner.invoke(cli.main, args=[f"-p{unused_tcp_port:d}", "-hlocalhost", "quit"])
         assert result.exit_code == 0
@@ -112,9 +109,7 @@ def test_cli_quit(unused_tcp_port: int) -> None:
 
 
 def test_cli_ping(unused_tcp_port: int) -> None:
-
     with server_in_process(unused_tcp_port) as server:
-
         runner = click.testing.CliRunner()
         result = runner.invoke(cli.main, args=[f"-p{unused_tcp_port:d}", "-hlocalhost", "ping"])
         assert result.exit_code == 0
@@ -127,9 +122,7 @@ def test_cli_ping(unused_tcp_port: int) -> None:
 
 
 def test_cli_run_help(unused_tcp_port: int) -> None:
-
     with server_in_process(unused_tcp_port) as server:
-
         runner = click.testing.CliRunner()
         result = runner.invoke(cli.main, args=[f"-p{unused_tcp_port:d}", "-hlocalhost", "run", "--", "--help"])
         assert result.exit_code == 0
@@ -141,9 +134,7 @@ def test_cli_run_help(unused_tcp_port: int) -> None:
 
 
 def test_cli_run_unknown_argument(unused_tcp_port: int) -> None:
-
     with server_in_process(unused_tcp_port) as server:
-
         runner = click.testing.CliRunner()
         result = runner.invoke(cli.main, args=[f"-p{unused_tcp_port:d}", "-hlocalhost", "run", "--", "--foo"])
         assert result.exit_code == 2
@@ -386,7 +377,6 @@ def test_server_cli_term(unused_tcp_port: int) -> None:
     """Test how the server process responds to interruptions"""
 
     with server_in_process(unused_tcp_port) as proc:
-
         # Ensure we can roundtrip with the server before killing it.
         runner = click.testing.CliRunner()
         result = runner.invoke(cli.main, args=[f"-p{unused_tcp_port:d}", "-hlocalhost", "ping"])
@@ -399,7 +389,6 @@ def test_server_cli_term(unused_tcp_port: int) -> None:
 
 
 def test_cli_loglevel() -> None:
-
     runner = click.testing.CliRunner()
 
     @click.command()
@@ -420,7 +409,6 @@ def test_cli_loglevel() -> None:
 
 
 def test_cli_version() -> None:
-
     runner = click.testing.CliRunner()
 
     result = runner.invoke(cli.main, "--version")

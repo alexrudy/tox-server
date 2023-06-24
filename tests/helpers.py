@@ -7,9 +7,9 @@ import sys
 import unittest.mock as mock
 from typing import Any
 from typing import AsyncIterator
-from typing import Awaitable
 from typing import Callable
 from typing import cast
+from typing import Coroutine
 from typing import Tuple
 from typing import TypeVar
 
@@ -17,7 +17,6 @@ import pytest
 import zmq.asyncio
 
 import tox_server as ts
-import tox_server.process
 from tox_server.protocol import Command
 from tox_server.protocol import Message
 from tox_server.server import Server
@@ -76,9 +75,12 @@ async def ensure_task_finished(task: asyncio.Future) -> bool:
     return task.done()
 
 
+T = TypeVar("T")
+
+
 @contextlib.asynccontextmanager
-async def run_task(aw: Awaitable[Any]) -> AsyncIterator[asyncio.Future]:
-    task = asyncio.create_task(aw)
+async def run_task(aw: "Coroutine[Any, Any, T]") -> "AsyncIterator[asyncio.Future[T]]":
+    task: "asyncio.Task[T]" = asyncio.create_task(aw)
     try:
         yield task
     finally:
@@ -88,7 +90,6 @@ async def run_task(aw: Awaitable[Any]) -> AsyncIterator[asyncio.Future]:
 
 @contextlib.asynccontextmanager
 async def run_server(uri: str, zctx: zmq.asyncio.Context) -> AsyncIterator[asyncio.Future]:
-
     server = Server(uri, zctx=zctx)
     async with run_task(server.serve_forever()) as server_task:
         yield server_task
@@ -97,9 +98,7 @@ async def run_server(uri: str, zctx: zmq.asyncio.Context) -> AsyncIterator[async
 async def check_command(
     command: str, args: Any, uri: URI, zctx: zmq.asyncio.Context, process: SubprocessManager
 ) -> Tuple[Message, bool]:
-
     async with run_server(uri.bind, zctx) as server_task:
-
         message = Message(command=Command[command], args=args)
         client_task = asyncio.create_task(ts.client.client(uri.connect, message, zctx=zctx, timeout=1))
         process.returncode.set_result(0)
